@@ -1945,6 +1945,7 @@ impl SqliteBackend {
         let mut emails = Vec::new();
         let mut metadata = Vec::new();
         let mut resources = Vec::new();
+        let mut sources = Vec::new();
         for page in profiles.chunks(super::rbac::IN_LIST_CHUNK) {
             let ids = super::rbac::placeholders(page.len());
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -1955,8 +1956,28 @@ impl SqliteBackend {
             for profile in page {
                 read = read.bind(profile.id);
             }
+            let first = resources.len();
             for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
                 resources.push(super::directory::resource(&row)?);
+            }
+            // The asking source's own identifiers of these resources.
+            if let Some(connector) = query.source {
+                let found = &resources[first..];
+                let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "SELECT {} FROM directory_user_sources
+                     WHERE retired = 0 AND connector_id = ? AND resource_id IN ({})",
+                    super::directory::SOURCE,
+                    super::rbac::placeholders(found.len())
+                )))
+                .bind(connector);
+                for resource in found {
+                    read = read.bind(resource.id.0);
+                }
+                if !found.is_empty() {
+                    for row in read.fetch_all(&mut *tx).await.map_err(failed)? {
+                        sources.push(super::directory::source(&row)?);
+                    }
+                }
             }
             let mut read = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT pr.*,
@@ -1999,7 +2020,7 @@ impl SqliteBackend {
         Ok(sid_core::models::DirectoryPage {
             total: u64::try_from(total).expect("a count is not negative"),
             users: crate::directory_query::assemble(
-                profiles, resources, principals, emails, metadata,
+                profiles, resources, sources, principals, emails, metadata,
             )?,
         })
     }

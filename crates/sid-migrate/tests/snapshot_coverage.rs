@@ -1060,6 +1060,18 @@ async fn activity(source: &SqliteBackend, installation: &Installation, profile: 
             .await
             .unwrap()
     );
+    // A user the connector created, known to it by its own identifier.
+    source
+        .write_directory_user(
+            &sid_core::models::DirectoryUserWrite::new(
+                sid_core::models::DirectoryWriteMode::Create,
+                Profile::new(None::<String>),
+            )
+            .by_source(connector.id, Some("HR-1".into())),
+            ctx(),
+        )
+        .await
+        .unwrap();
     // A role the connector holds: its revision counts the grant, and the
     // restored connector keeps that revision.
     let provisioner = Role::new(ProjectId::SYSTEM, "provisioner", "Provisioner");

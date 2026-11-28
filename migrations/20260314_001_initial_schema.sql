@@ -976,6 +976,23 @@ CREATE TABLE directory_users (
     CONSTRAINT directory_users_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 );
 
+-- A provisioning source's correlation with a user resource: which connector
+-- knows the resource, and by what identifier of its own (SCIM externalId,
+-- scoped to that connector). It records provenance; it is neither a
+-- condition of reading the resource nor authority to change it.
+CREATE TABLE directory_user_sources (
+    resource_id uuid NOT NULL,
+    connector_id uuid NOT NULL,
+    external_id text,
+    -- Set with the resource's deletion: the provenance stays, the source's
+    -- identifier is free for a new resource.
+    retired boolean DEFAULT false NOT NULL,
+    CONSTRAINT directory_user_sources_pkey PRIMARY KEY (resource_id, connector_id),
+    CONSTRAINT directory_user_sources_external_id_check CHECK ((external_id <> ''::text)),
+    CONSTRAINT directory_user_sources_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES directory_users(id) ON DELETE CASCADE,
+    CONSTRAINT directory_user_sources_connector_id_fkey FOREIGN KEY (connector_id) REFERENCES provisioning_connectors(id) ON DELETE CASCADE
+);
+
 CREATE TABLE profile_phones (
     id uuid NOT NULL,
     profile_id uuid NOT NULL,
@@ -1984,6 +2001,12 @@ CREATE UNIQUE INDEX idx_profile_phones_profile_e164 ON profile_phones USING btre
 CREATE INDEX idx_profile_phones_profile_id ON profile_phones USING btree (profile_id);
 
 CREATE UNIQUE INDEX idx_directory_users_live_profile ON directory_users USING btree (profile_id) WHERE (deleted_at IS NULL);
+
+-- A source names one live resource by an identifier of its own.
+CREATE UNIQUE INDEX idx_directory_user_sources_external_id ON directory_user_sources USING btree (connector_id, external_id) WHERE ((NOT retired) AND (external_id IS NOT NULL));
+
+-- A connector's deletion cascades through every correlation it has.
+CREATE INDEX idx_directory_user_sources_connector ON directory_user_sources USING btree (connector_id);
 
 -- Every resource of an account, deleted ones included: the account's
 -- deletion cascades through it, and an import replaces the account's set.

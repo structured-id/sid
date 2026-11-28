@@ -85,6 +85,11 @@ pub struct DirectoryQuery {
     /// `{userName}#{domain}`.
     pub org_domain: String,
     pub filter: Option<DirectoryFilter>,
+    /// The provisioning source asking. `externalId` is a source's own
+    /// identifier of a resource: the page carries, and a filter on it
+    /// compares, only this source's. With no source asking, no resource has
+    /// an `externalId`.
+    pub source: Option<super::ProvisioningConnectorId>,
     /// Matching users skipped before the page (`startIndex - 1`).
     pub offset: u64,
     /// Users in the page at most; 0 asks only for the total.
@@ -96,6 +101,8 @@ pub struct DirectoryQuery {
 pub struct DirectoryUser {
     /// The resource's identifier: the SCIM `id`.
     pub id: super::DirectoryUserId,
+    /// The asking source's own identifier of the resource, if it has one.
+    pub external_id: Option<String>,
     pub profile: Profile,
     pub principals: Vec<Principal>,
     pub emails: Vec<ProfileEmail>,
@@ -112,8 +119,6 @@ pub struct DirectoryPage {
 
 /// Metadata keys a directory user's SCIM attributes are read from.
 pub mod metadata_keys {
-    /// `externalId`.
-    pub const EXTERNAL_ID: &str = "employee_id";
     /// `department`.
     pub const DEPARTMENT: &str = "department";
     /// `title`.

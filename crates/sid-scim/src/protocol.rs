@@ -70,6 +70,7 @@ impl ScimProtocolService for ScimProtocolServiceImpl {
                 department: user.department,
                 title: user.title,
                 active: user.active,
+                employee_number: user.employee_number,
             })
         }) {
             Ok(typed) => typed,
@@ -148,6 +149,7 @@ impl ScimProtocolService for ScimProtocolServiceImpl {
                 department: user.department,
                 title: user.title,
                 active: user.active,
+                employee_number: user.employee_number,
             })
         }) {
             Ok(typed) => typed,
@@ -493,6 +495,7 @@ struct UserJson {
     emails: Vec<proto::ScimEmail>,
     phone_numbers: Vec<proto::ScimPhoneNumber>,
     department: String,
+    employee_number: String,
     title: String,
     active: bool,
 }
@@ -531,9 +534,12 @@ impl UserJson {
                 })
             })
             .collect::<Result<_, Refused>>()?;
-        let department = match complex(user, ENTERPRISE_SCHEMA)? {
-            Some(enterprise) => string(enterprise, "department")?,
-            None => String::new(),
+        let (department, employee_number) = match complex(user, ENTERPRISE_SCHEMA)? {
+            Some(enterprise) => (
+                string(enterprise, "department")?,
+                string(enterprise, "employeeNumber")?,
+            ),
+            None => Default::default(),
         };
         Ok(Self {
             external_id: string(user, "externalId")?,
@@ -543,6 +549,7 @@ impl UserJson {
             emails,
             phone_numbers,
             department,
+            employee_number,
             title: string(user, "title")?,
             // RFC 7643 §4.1.1 gives `active` no default: only an explicit
             // `false` deactivates, an omitted one never does.
@@ -775,12 +782,14 @@ pub fn user_json(user: &proto::ScimUser) -> Value {
             .collect();
         object.insert("groups".into(), groups.into());
     }
-    if !user.department.is_empty() {
+    // RFC 7643 §4.3: the extension object carries whichever of its
+    // attributes the user has, and is named in `schemas` when it has any.
+    let mut enterprise = Map::new();
+    put(&mut enterprise, "employeeNumber", &user.employee_number);
+    put(&mut enterprise, "department", &user.department);
+    if !enterprise.is_empty() {
         schemas.push(ENTERPRISE_SCHEMA);
-        object.insert(
-            ENTERPRISE_SCHEMA.into(),
-            json!({ "department": user.department }),
-        );
+        object.insert(ENTERPRISE_SCHEMA.into(), Value::Object(enterprise));
     }
     if let Some(meta) = &user.meta {
         object.insert("meta".into(), meta_json(meta));

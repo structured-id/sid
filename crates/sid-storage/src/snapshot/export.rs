@@ -87,6 +87,14 @@ pub async fn export(store: Store<'_>, rules: &dyn SnapshotRules) -> Result<Snaps
         .into_iter()
         .filter(|r| exported.contains(&r.profile_id))
         .collect();
+    let exported: std::collections::BTreeSet<_> =
+        snapshot.directory_users.iter().map(|r| r.id).collect();
+    snapshot.directory_sources = backend
+        .export_directory_sources()
+        .await?
+        .into_iter()
+        .filter(|s| exported.contains(&s.resource))
+        .collect();
 
     info!("exporting per-profile entities...");
     let installation = snapshot.metadata.installation_org;

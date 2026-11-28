@@ -635,32 +635,6 @@ pub async fn import(
             Err(e) => return Err(e.into()),
         }
     }
-    // Each account takes the directory resources it had, in place of the
-    // one assigned when it was created just above.
-    // Grouped once: every account has a resource, so a scan of them all per
-    // account would be quadratic in the installation's size.
-    let mut resources_of: std::collections::BTreeMap<_, Vec<_>> = Default::default();
-    for resource in &snapshot.directory_users {
-        resources_of
-            .entry(resource.profile_id)
-            .or_default()
-            .push(*resource);
-    }
-    for profile in &snapshot.profiles {
-        // Every stored account has a resource, deleted or not: none in the
-        // archive means nothing to restore, and the assigned one stays.
-        let Some(resources) = resources_of.get(&profile.id) else {
-            continue;
-        };
-        backend
-            .import_directory_users(
-                profile.id,
-                resources,
-                audit("import_directory_users", &profile.id.to_string()),
-            )
-            .await?;
-    }
-
     info!(count = snapshot.projects.len(), "importing projects...");
     for project in &snapshot.projects {
         // The system project is the target's own, created with the store: it
@@ -1143,6 +1117,46 @@ pub async fn import(
             },
         )
         .await?;
+    }
+    // Each account takes the directory resources it had, in place of the
+    // one assigned when it was created, with the sources that knew them:
+    // after the connectors those sources are. Grouped once: every account
+    // has a resource, so a scan of them all per account would be quadratic
+    // in the installation's size.
+    let mut resources_of: std::collections::BTreeMap<_, Vec<_>> = Default::default();
+    for resource in &snapshot.directory_users {
+        resources_of
+            .entry(resource.profile_id)
+            .or_default()
+            .push(*resource);
+    }
+    let mut sources_of: std::collections::BTreeMap<_, Vec<_>> = Default::default();
+    for source in &snapshot.directory_sources {
+        sources_of
+            .entry(source.resource)
+            .or_default()
+            .push(source.clone());
+    }
+    for profile in &snapshot.profiles {
+        // Every stored account has a resource, deleted or not: none in the
+        // archive means nothing to restore, and the assigned one stays.
+        let Some(resources) = resources_of.get(&profile.id) else {
+            continue;
+        };
+        let sources: Vec<_> = resources
+            .iter()
+            .filter_map(|r| sources_of.get(&r.id))
+            .flatten()
+            .cloned()
+            .collect();
+        backend
+            .import_directory_users(
+                profile.id,
+                resources,
+                &sources,
+                audit("import_directory_users", &profile.id.to_string()),
+            )
+            .await?;
     }
     for credential in &snapshot.provisioning_credentials {
         if backend

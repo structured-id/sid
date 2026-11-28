@@ -3547,10 +3547,32 @@ impl StorageBackend for PostgresBackend {
         &self,
         profile_id: ProfileId,
         resources: &[sid_core::models::DirectoryResource],
+        sources: &[sid_core::models::DirectorySource],
         ctx: MutationContext,
     ) -> SidResult<()> {
-        self.import_directory_users_impl(profile_id, resources, ctx)
+        self.import_directory_users_impl(profile_id, resources, sources, ctx)
             .await
+    }
+
+    async fn directory_sources(
+        &self,
+        connector: Option<sid_core::models::ProvisioningConnectorId>,
+        resources: &[sid_core::models::DirectoryUserId],
+    ) -> SidResult<Vec<sid_core::models::DirectorySource>> {
+        self.directory_sources_impl(connector, resources).await
+    }
+
+    async fn find_directory_source(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        external_id: &str,
+    ) -> SidResult<Option<sid_core::models::DirectorySource>> {
+        self.find_directory_source_impl(connector, external_id)
+            .await
+    }
+
+    async fn export_directory_sources(&self) -> SidResult<Vec<sid_core::models::DirectorySource>> {
+        self.export_directory_sources_impl().await
     }
 
     async fn write_directory_group(
@@ -4118,12 +4140,29 @@ impl StorageBackend for PostgresBackend {
         .iter()
         .map(directory::resource)
         .collect::<SidResult<Vec<_>>>()?;
+        // The asking source's own identifiers of the page's resources.
+        let sources = match query.source {
+            Some(connector) => sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {} FROM directory_user_sources
+                 WHERE connector_id = $1 AND NOT retired AND resource_id = ANY($2)",
+                directory::SOURCE
+            )))
+            .bind(connector)
+            .bind(resources.iter().map(|r| r.id.0).collect::<Vec<_>>())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(failed)?
+            .iter()
+            .map(directory::source)
+            .collect::<SidResult<Vec<_>>>()?,
+            None => Vec::new(),
+        };
         tx.commit().await.map_err(failed)?;
 
         Ok(sid_core::models::DirectoryPage {
             total: u64::try_from(total).expect("a count is not negative"),
             users: crate::directory_query::assemble(
-                profiles, resources, principals, emails, metadata,
+                profiles, resources, sources, principals, emails, metadata,
             )?,
         })
     }

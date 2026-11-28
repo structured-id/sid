@@ -45,6 +45,9 @@ pub(crate) fn condition(dialect: Dialect, query: &DirectoryQuery) -> SidResult<C
         ),
         binds: Vec::new(),
         suffix: format!("#{}", query.org_domain),
+        source: query
+            .source
+            .map(|connector| connector.into_uuid().simple().to_string()),
     };
     if let Some(filter) = &query.filter {
         out.sql.push_str(" AND (");
@@ -64,6 +67,8 @@ pub(crate) fn condition(dialect: Dialect, query: &DirectoryQuery) -> SidResult<C
 pub(crate) fn assemble(
     profiles: Vec<sid_core::models::Profile>,
     resources: Vec<sid_core::models::DirectoryResource>,
+    // The asking source's correlations with those resources.
+    sources: Vec<sid_core::models::DirectorySource>,
     principals: Vec<sid_core::models::Principal>,
     emails: Vec<sid_core::models::ProfileEmail>,
     metadata: Vec<sid_core::models::ProfileMetadata>,
@@ -73,6 +78,11 @@ pub(crate) fn assemble(
         .into_iter()
         .filter(|r| r.is_live())
         .map(|r| (r.profile_id, r.id))
+        .collect();
+    let mut external_id_of: HashMap<_, _> = sources
+        .into_iter()
+        .filter(|s| !s.retired)
+        .filter_map(|s| s.external_id.map(|id| (s.resource, id)))
         .collect();
     let mut principals_of: HashMap<_, Vec<_>> = HashMap::new();
     for principal in principals {
@@ -100,6 +110,7 @@ pub(crate) fn assemble(
             })?;
             Ok(sid_core::models::DirectoryUser {
                 id,
+                external_id: external_id_of.remove(&id),
                 principals: principals_of.remove(&profile.id).unwrap_or_default(),
                 emails: emails_of.remove(&profile.id).unwrap_or_default(),
                 metadata: metadata_of.remove(&profile.id).unwrap_or_default(),
@@ -128,6 +139,9 @@ struct Writer {
     binds: Vec<String>,
     /// `#{domain}`: what ends a corporate login.
     suffix: String,
+    /// The asking provisioning source, as 32 hex digits: `externalId` is
+    /// that source's own identifier of a resource.
+    source: Option<String>,
 }
 
 #[cfg(any(feature = "storage-pg", feature = "storage-sqlite"))]
@@ -310,13 +324,35 @@ impl Writer {
                 "CASE WHEN coalesce(p.given_name, '') <> '' OR coalesce(p.family_name, '') <> '' \
                  THEN {display} END"
             ),
-            Attr::ExternalId => self.metadata(metadata_keys::EXTERNAL_ID),
+            Attr::ExternalId => self.external_id(),
             Attr::Title => self.metadata(metadata_keys::TITLE),
             Attr::Department => self.metadata(metadata_keys::DEPARTMENT),
             Attr::Active | Attr::UserName | Attr::Email | Attr::Phone => {
                 unreachable!("{attr:?} is not compared as a single value")
             }
         }
+    }
+
+    /// The asking source's own identifier of `p`'s live resource, NULL when
+    /// it has none or no source asks: another source's identifier is never
+    /// compared (RFC 7643 3.1, `externalId` is the provisioning client's).
+    fn external_id(&mut self) -> String {
+        let Some(source) = self.source.clone() else {
+            return "NULL".into();
+        };
+        let asked = self.bind(source);
+        let connector = match self.dialect {
+            #[cfg(feature = "storage-pg")]
+            Dialect::Postgres => format!("({asked})::uuid"),
+            #[cfg(feature = "storage-sqlite")]
+            Dialect::Sqlite => format!("unhex({asked})"),
+        };
+        format!(
+            "(SELECT s.external_id FROM directory_user_sources s \
+             JOIN directory_users d ON d.id = s.resource_id \
+             WHERE d.profile_id = p.id AND d.deleted_at IS NULL \
+             AND NOT s.retired AND s.connector_id = {connector})"
+        )
     }
 
     /// The string value of metadata `key` of `p`, NULL when absent, empty or

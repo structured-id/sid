@@ -111,9 +111,9 @@ pub(crate) fn group_not_found(id: GroupId) -> Status {
     not_found(ErrorReason::GroupNotFound, "Group", id.to_string())
 }
 
-/// A user write refused by storage. The only unique attribute a user write
-/// can collide on is its login handle, `userName` (RFC 7644 §3.3,
-/// `uniqueness`).
+/// A user write refused by storage. A conflict that is not the source's own
+/// `externalId` (told apart by the caller, [`external_id_taken`]) is the
+/// login handle, `userName` (RFC 7644 §3.3, `uniqueness`).
 pub(crate) fn user_write(id: impl core::fmt::Display, e: SidError) -> Status {
     match e {
         SidError::Conflict(_) => ApiError::new(
@@ -129,6 +129,18 @@ pub(crate) fn user_write(id: impl core::fmt::Display, e: SidError) -> Status {
         SidError::Validation(rule) => internal("scim user write", rule),
         other => shared_write(other),
     }
+}
+
+/// The asking source already knows another user by this `externalId`
+/// (RFC 7644 §3.3, `uniqueness`).
+pub(crate) fn external_id_taken() -> Status {
+    ApiError::new(
+        ErrorReason::ProfileAlreadyExists,
+        "the externalId names another user of this client",
+    )
+    .with_field_violation("externalId", "names another user of this client")
+    .with_metadata(SCIM_TYPE, "uniqueness")
+    .into()
 }
 
 /// A group write refused by storage: a name already used in the project is

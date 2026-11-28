@@ -93,11 +93,13 @@ fn a_user_is_read_with_its_extension() {
         "emails": [{ "value": "ada@corp.example.com", "type": "work", "primary": true }],
         "phoneNumbers": [{ "value": "+15551234567", "type": "work" }],
         "title": "Engineer",
-        ENTERPRISE_SCHEMA: { "department": "R&D" },
+        ENTERPRISE_SCHEMA: { "department": "R&D", "employeeNumber": "701984" },
     });
     let read = UserJson::read(user.as_object().unwrap()).unwrap();
     assert_eq!(read.user_name, "ada");
+    // The client's identifier and the employee number are two values.
     assert_eq!(read.external_id, "E-1");
+    assert_eq!(read.employee_number, "701984");
     assert_eq!(read.name.unwrap().family_name, "Lovelace");
     assert_eq!(read.emails[0].value, "ada@corp.example.com");
     assert!(read.emails[0].primary);
@@ -256,11 +258,26 @@ fn a_user_renders_as_rfc_7643() {
     );
     assert!(rendered["meta"].get("lastModified").is_none());
 
+    // An employee number alone brings the extension, without a department.
+    user.employee_number = "701984".into();
+    let rendered = user_json(&user);
+    assert_eq!(rendered["schemas"], json!([USER_SCHEMA, ENTERPRISE_SCHEMA]));
+    assert_eq!(
+        rendered[ENTERPRISE_SCHEMA],
+        json!({ "employeeNumber": "701984" })
+    );
+    assert!(rendered.get("externalId").is_none(), "not the client's id");
+
     user.department = "R&D".into();
     let rendered = user_json(&user);
     assert_eq!(rendered["schemas"], json!([USER_SCHEMA, ENTERPRISE_SCHEMA]));
     assert_eq!(rendered[ENTERPRISE_SCHEMA]["department"], json!("R&D"));
+    assert_eq!(
+        rendered[ENTERPRISE_SCHEMA]["employeeNumber"],
+        json!("701984")
+    );
     assert!(rendered.get("department").is_none());
+    assert!(rendered.get("employeeNumber").is_none());
 }
 
 /// A created resource is 201 with its location (RFC 7644 §3.3).

@@ -69,18 +69,61 @@ impl ScimServiceImpl {
         }
     }
 
-    /// Where this directory renders its user resources.
-    fn place(&self) -> crate::mapping::ScimPlace<'_> {
+    /// Where this directory renders a user resource, for a source that
+    /// knows the user as `external_id`.
+    fn place<'a>(&'a self, external_id: Option<&'a str>) -> crate::mapping::ScimPlace<'a> {
         crate::mapping::ScimPlace {
             org_domain: &self.org_ctx.org_domain,
             base_url: &self.base_url,
+            external_id,
         }
+    }
+
+    /// What `caller` itself calls the user `resource`, if anything: another
+    /// source's identifier is never shown to it (RFC 7643 3.1).
+    #[allow(clippy::result_large_err)]
+    async fn external_id_of(
+        &self,
+        caller: &ConnectorCaller,
+        resource: DirectoryUserId,
+    ) -> Result<Option<String>, Status> {
+        Ok(self
+            .storage
+            .directory_sources(Some(caller.connector.id), &[resource])
+            .await
+            .map_err(storage_failure)?
+            .into_iter()
+            .find_map(|source| source.external_id))
     }
 
     /// Also accept the directory resource's access tokens `tokens` verifies.
     pub fn with_access_tokens(mut self, tokens: Arc<ResourceTokenVerifier>) -> Self {
         self.tokens = Some(tokens);
         self
+    }
+
+    /// Whether a login handle `write` binds for a new user is already held.
+    #[allow(clippy::result_large_err)]
+    async fn login_taken(&self, write: &DirectoryUserWrite) -> Result<bool, Status> {
+        if !matches!(write.mode, DirectoryWriteMode::Create) {
+            return Ok(false);
+        }
+        for login in write
+            .bind
+            .iter()
+            .filter(|p| p.principal_type == PrincipalType::Username)
+        {
+            if self
+                .storage
+                .get_principal_by_value(PrincipalType::Username, &login.value)
+                .await
+                .map_err(storage_failure)?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Apply one request's changes to a user in one write, then stop the
@@ -92,16 +135,33 @@ impl ScimServiceImpl {
         write: &DirectoryUserWrite,
         ctx: MutationContext,
     ) -> Result<(), Status> {
-        let ended = self
-            .storage
-            .write_directory_user(write, ctx)
-            .await
-            // A refusal names the user as the client knows it, never by the
-            // account's identifier.
-            .map_err(|e| match write.resource {
-                Some(resource) => refusal::user_write(resource, e),
-                None => refusal::user_write("", e),
-            })?;
+        let ended = match self.storage.write_directory_user(write, ctx).await {
+            Ok(ended) => ended,
+            Err(e) => {
+                // A conflict is the login handle when the one being bound is
+                // taken (a repeated create collides on both and is told so),
+                // and the source's own identifier when the source already
+                // gives it to another user.
+                if let (sid_core::Error::Conflict(_), Some(source)) = (&e, &write.source)
+                    && let Some(external_id) = &source.external_id
+                    && !self.login_taken(write).await?
+                    && self
+                        .storage
+                        .find_directory_source(source.connector, external_id)
+                        .await
+                        .map_err(storage_failure)?
+                        .is_some_and(|held| Some(held.resource) != write.resource)
+                {
+                    return Err(refusal::external_id_taken());
+                }
+                // A refusal names the user as the client knows it, never by
+                // the account's identifier.
+                return Err(match write.resource {
+                    Some(resource) => refusal::user_write(resource, e),
+                    None => refusal::user_write("", e),
+                });
+            }
+        };
         for session in &ended {
             if let Err(e) = self.revocation.revoke_session(session.id.to_string()).await {
                 warn!(
@@ -245,7 +305,11 @@ impl ScimService for ScimServiceImpl {
 
         // One write: an account whose login handle is taken (RFC 7644 §3.3,
         // 409) or that cannot be stored whole leaves nothing behind.
-        let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Create, profile.clone());
+        // The source's own identifier of the user is its correlation with
+        // the resource, never an attribute of the account (RFC 7643 3.1).
+        let external_id = (!req.external_id.is_empty()).then(|| req.external_id.clone());
+        let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Create, profile.clone())
+            .by_source(caller.connector.id, external_id.clone());
         write.bind = principals.clone();
         write.add_emails = emails;
         write.add_phones = phones;
@@ -263,7 +327,7 @@ impl ScimService for ScimServiceImpl {
             &write.add_emails,
             &metadata,
             &[],
-            self.place(),
+            self.place(external_id.as_deref()),
         )))
     }
 
@@ -272,7 +336,7 @@ impl ScimService for ScimServiceImpl {
         &self,
         request: Request<proto::ScimGetUserRequest>,
     ) -> Result<Response<proto::ScimUser>, Status> {
-        self.provisioner(&request, SCIM_USER_READ).await?;
+        let caller = self.provisioner(&request, SCIM_USER_READ).await?;
         let req = request.into_inner();
         let (resource, profile_id) = self.user(&req.id).await?;
 
@@ -308,6 +372,7 @@ impl ScimService for ScimServiceImpl {
             .await
             .map_err(storage_failure)?;
 
+        let external_id = self.external_id_of(&caller, resource).await?;
         let scim_user = sid_to_scim_user(
             resource,
             &profile,
@@ -315,7 +380,7 @@ impl ScimService for ScimServiceImpl {
             &emails,
             &metadata,
             &group_refs,
-            self.place(),
+            self.place(external_id.as_deref()),
         );
 
         Ok(Response::new(scim_user))
@@ -326,7 +391,7 @@ impl ScimService for ScimServiceImpl {
         &self,
         request: Request<proto::ScimListUsersRequest>,
     ) -> Result<Response<proto::ScimListUsersResponse>, Status> {
-        self.provisioner(&request, SCIM_USER_READ).await?;
+        let caller = self.provisioner(&request, SCIM_USER_READ).await?;
         let req = request.into_inner();
 
         // SCIM pagination: 1-based startIndex
@@ -351,6 +416,8 @@ impl ScimService for ScimServiceImpl {
             filter,
             offset: u64::try_from(start_index - 1).expect("start_index is at least 1"),
             limit: u64::try_from(count).expect("count is positive"),
+            // externalId is shown and compared as the caller's own.
+            source: Some(caller.connector.id),
         };
         let page = match self.storage.query_directory(&query).await {
             Ok(page) => page,
@@ -369,7 +436,7 @@ impl ScimService for ScimServiceImpl {
                     &user.emails,
                     &user.metadata,
                     &[], // Groups are read per user, not for a list.
-                    self.place(),
+                    self.place(user.external_id.as_deref()),
                 )
             })
             .collect();
@@ -420,8 +487,14 @@ impl ScimService for ScimServiceImpl {
 
         check_single_primary(&req.emails, &req.phone_numbers).map_err(refusal::mapping)?;
         let now = jiff::Timestamp::now();
-        let mut write =
-            DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone()).through(resource);
+        // PUT replaces the caller's own identifier of the user with the one
+        // given, absent included; another source's is not its to touch.
+        let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone())
+            .through(resource)
+            .by_source(
+                caller.connector.id,
+                (!req.external_id.is_empty()).then(|| req.external_id.clone()),
+            );
 
         // Replace contact emails and phones (profile_emails, profile_phones).
         write.remove_emails = self
@@ -534,7 +607,7 @@ impl ScimService for ScimServiceImpl {
         // request leaves empty is cleared.
         let mut new_metadata = Vec::new();
         for (key, value) in [
-            ("employee_id", &req.external_id),
+            ("employee_id", &req.employee_number),
             ("department", &req.department),
             ("title", &req.title),
         ] {
@@ -578,6 +651,8 @@ impl ScimService for ScimServiceImpl {
             .list_profile_emails(profile_id)
             .await
             .map_err(storage_failure)?;
+        // As stored: a source that does not know the user has none.
+        let external_id = self.external_id_of(&caller, resource).await?;
         Ok(Response::new(sid_to_scim_user(
             resource,
             &profile,
@@ -585,7 +660,7 @@ impl ScimService for ScimServiceImpl {
             &emails,
             &new_metadata,
             &group_refs,
-            self.place(),
+            self.place(external_id.as_deref()),
         )))
     }
 
@@ -660,6 +735,11 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?;
         let mut write =
             DirectoryUserWrite::new(DirectoryWriteMode::Update, profile.clone()).through(resource);
+        // Only a request that names externalId changes the caller's own
+        // identifier of the user.
+        if let Some(external_id) = &patch_result.external_id {
+            write = write.by_source(caller.connector.id, external_id.clone());
+        }
         // A deactivation ends the access whatever state the account keeps.
         if patch_result.deactivated || profile.status == ProfileStatus::Suspended {
             write.end_access = Some(deprovision());
@@ -814,6 +894,7 @@ impl ScimService for ScimServiceImpl {
             .list_profile_emails(profile_id)
             .await
             .map_err(storage_failure)?;
+        let external_id = self.external_id_of(&caller, resource).await?;
 
         Ok(Response::new(sid_to_scim_user(
             resource,
@@ -822,7 +903,7 @@ impl ScimService for ScimServiceImpl {
             &emails,
             &metadata,
             &group_refs,
-            self.place(),
+            self.place(external_id.as_deref()),
         )))
     }
 
@@ -1188,6 +1269,18 @@ impl ScimService for ScimServiceImpl {
                     attributes: user_schema_attributes(),
                     ..Default::default()
                 },
+                // RFC 7643 §4.3: the attributes a User carries under the
+                // enterprise extension's own schema URI.
+                proto::ScimSchema {
+                    id: crate::protocol::ENTERPRISE_SCHEMA.into(),
+                    name: "EnterpriseUser".into(),
+                    description: "Enterprise User".into(),
+                    attributes: vec![
+                        schema_attr("employeeNumber", "string", false, false, "readWrite"),
+                        schema_attr("department", "string", false, false, "readWrite"),
+                    ],
+                    ..Default::default()
+                },
                 proto::ScimSchema {
                     id: "urn:ietf:params:scim:schemas:core:2.0:Group".into(),
                     name: "Group".into(),
@@ -1320,7 +1413,6 @@ fn user_schema_attributes() -> Vec<proto::ScimSchemaAttribute> {
         schema_attr("phoneNumbers", "complex", false, true, "readWrite"),
         schema_attr("active", "boolean", false, false, "readWrite"),
         schema_attr("title", "string", false, false, "readWrite"),
-        schema_attr("department", "string", false, false, "readWrite"),
         schema_attr("externalId", "string", false, false, "readWrite"),
         schema_attr("groups", "complex", false, true, "readOnly"),
     ]

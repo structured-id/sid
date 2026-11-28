@@ -166,8 +166,14 @@ pub trait StorageBackend:
     /// only while that resource is live and stands for the account, and is
     /// `Error::NotFound` otherwise; with `write.delete_resource` the same
     /// commit deletes the resource. Every created account gets a resource of
-    /// its own. Returns the sessions a deprovisioning ended, so their tokens
-    /// can be revoked.
+    /// its own. With `write.source`, a create records that source's
+    /// correlation with the new resource, and an update gives the
+    /// correlation the source already has with `write.resource` the
+    /// identifier it carries, never creating one; an identifier the source
+    /// already gives another live resource is `Error::Conflict` and writes
+    /// nothing. A deletion keeps the resource's correlations as provenance
+    /// and frees their identifiers. Returns the sessions a deprovisioning
+    /// ended, so their tokens can be revoked.
     async fn write_directory_user(
         &self,
         write: &DirectoryUserWrite,
@@ -192,16 +198,39 @@ pub trait StorageBackend:
     async fn export_directory_users(&self) -> Result<Vec<sid_core::models::DirectoryResource>>;
 
     /// Give the account `profile_id` exactly `resources` (its own, one live
-    /// at most), replacing the resource assigned when it was created: a
-    /// restored account keeps the identifiers its clients know. A repeat
-    /// changes nothing; an identifier that stands for another account is
+    /// at most), replacing the resource assigned when it was created, and
+    /// give those resources exactly `sources` (each naming one of them and
+    /// a stored connector): a restored account keeps the identifiers its
+    /// clients know and where each resource came from. A repeat changes
+    /// nothing; an identifier that stands for another account is
     /// `Error::Conflict`.
     async fn import_directory_users(
         &self,
         profile_id: ProfileId,
         resources: &[sid_core::models::DirectoryResource],
+        sources: &[sid_core::models::DirectorySource],
         ctx: MutationContext,
     ) -> Result<()>;
+
+    /// The correlations provisioning sources have with the live `resources`:
+    /// of `connector` only when one is given. A resource no source knows has
+    /// none.
+    async fn directory_sources(
+        &self,
+        connector: Option<sid_core::models::ProvisioningConnectorId>,
+        resources: &[sid_core::models::DirectoryUserId],
+    ) -> Result<Vec<sid_core::models::DirectorySource>>;
+
+    /// The live resource `connector` names by its own `external_id`, if any.
+    async fn find_directory_source(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        external_id: &str,
+    ) -> Result<Option<sid_core::models::DirectorySource>>;
+
+    /// Every source correlation, those of deleted resources included, by
+    /// resource.
+    async fn export_directory_sources(&self) -> Result<Vec<sid_core::models::DirectorySource>>;
 
     /// Apply one directory write to a group in one transaction, with its
     /// audit entry and owed work (`Error::Conflict` on create over an

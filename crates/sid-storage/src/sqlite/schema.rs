@@ -1215,6 +1215,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_directory_users_live_profile
 CREATE INDEX IF NOT EXISTS idx_directory_users_profile ON directory_users(profile_id);
 
 --------------------------------------------------------------------------------
+-- directory_user_sources: which provisioning source knows which user resource,
+-- and by what identifier of its own (SCIM externalId, scoped to the connector).
+-- Provenance only: neither a condition of reading nor authority to change.
+-- `retired` is set with the resource's deletion and frees the identifier.
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS directory_user_sources (
+    resource_id   BLOB NOT NULL CHECK (length(resource_id) = 16) REFERENCES directory_users(id) ON DELETE CASCADE,
+    connector_id  BLOB NOT NULL CHECK (length(connector_id) = 16) REFERENCES provisioning_connectors(id) ON DELETE CASCADE,
+    external_id   TEXT CHECK (external_id <> ''),
+    retired       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (resource_id, connector_id)
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_directory_user_sources_external_id
+    ON directory_user_sources(connector_id, external_id) WHERE retired = 0 AND external_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_directory_user_sources_connector ON directory_user_sources(connector_id);
+
+--------------------------------------------------------------------------------
 -- profile_grants
 --------------------------------------------------------------------------------
 

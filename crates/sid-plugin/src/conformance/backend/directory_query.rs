@@ -9,8 +9,9 @@ use jiff::Timestamp;
 use sid_core::models::profile_email::EmailLabel;
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter as F, DirectoryOperator as Op, DirectoryQuery,
-    DirectoryUserWrite, DirectoryWriteMode, Principal, PrincipalType, Profile, ProfileEmail,
-    ProfileEmailId, ProfileMetadata, ProfileStatus,
+    DirectorySource, DirectoryUserWrite, DirectoryWriteMode, OrgId, Principal, PrincipalType,
+    Profile, ProfileEmail, ProfileEmailId, ProfileMetadata, ProfileStatus, ProvisioningConnector,
+    ProvisioningConnectorId, ProvisioningDirection,
 };
 use sid_plugin::storage::StorageBackend;
 
@@ -31,10 +32,38 @@ async fn add_user(
     emails: &[&str],
     metadata: &[(&str, &str)],
 ) -> Profile {
+    try_add_user(backend, domain, user_name, emails, metadata, None)
+        .await
+        .expect("a directory user is written")
+}
+
+/// A provisioning source of this run.
+async fn add_source(backend: &dyn StorageBackend) -> ProvisioningConnectorId {
+    let connector =
+        ProvisioningConnector::new(OrgId::generate(), ProvisioningDirection::Inbound, "source");
+    backend
+        .create_provisioning_connector(&connector, test_audit())
+        .await
+        .expect("a provisioning source is stored");
+    connector.id
+}
+
+/// [`add_user`], created by `source` under its own identifier when given.
+async fn try_add_user(
+    backend: &dyn StorageBackend,
+    domain: &str,
+    user_name: &str,
+    emails: &[&str],
+    metadata: &[(&str, &str)],
+    source: Option<(ProvisioningConnectorId, Option<&str>)>,
+) -> sid_core::Result<Profile> {
     let mut profile = Profile::new(None::<String>);
     profile.given_name = Some(format!("Given {user_name}"));
     let id = profile.id;
     let mut write = DirectoryUserWrite::new(DirectoryWriteMode::Create, profile.clone());
+    if let Some((connector, external_id)) = source {
+        write = write.by_source(connector, external_id.map(str::to_owned));
+    }
     write.bind.push(Principal::new(
         profile.id,
         PrincipalType::Username,
@@ -62,12 +91,9 @@ async fn add_user(
             serde_json::Value::String((*value).to_string()),
         ));
     }
-    backend
-        .write_directory_user(&write, test_audit())
-        .await
-        .expect("a directory user is written");
+    backend.write_directory_user(&write, test_audit()).await?;
     // As stored, at the revision a later update must name.
-    backend.get_profile(id).await.unwrap().expect("written")
+    Ok(backend.get_profile(id).await.unwrap().expect("written"))
 }
 
 /// `filter` over this run's users only: a shared database holds other runs'
@@ -81,6 +107,15 @@ fn query(domain: &str, filter: F, offset: u64, limit: u64) -> DirectoryQuery {
         )),
         offset,
         limit,
+        source: None,
+    }
+}
+
+/// [`query`] as the provisioning source `connector` asks it.
+fn query_as(connector: ProvisioningConnectorId, domain: &str, filter: F) -> DirectoryQuery {
+    DirectoryQuery {
+        source: Some(connector),
+        ..query(domain, filter, 0, 10)
     }
 }
 
@@ -188,23 +223,29 @@ pub async fn test_directory_filters_before_pagination(backend: &dyn StorageBacke
 /// a value is data, never SQL.
 pub async fn test_directory_comparison_semantics(backend: &dyn StorageBackend) {
     let domain = domain();
-    add_user(
+    let source = add_source(backend).await;
+    try_add_user(
         backend,
         &domain,
         "Alice.Smith",
         &[&format!("Alice@{domain}")],
-        &[("employee_id", "E-100"), ("department", "Sales")],
+        &[("department", "Sales")],
+        Some((source, Some("E-100"))),
     )
-    .await;
-    add_user(
+    .await
+    .unwrap();
+    try_add_user(
         backend,
         &domain,
         "bob.jones",
         &[],
-        &[("employee_id", "e-200"), ("title", "Engineer")],
+        &[("title", "Engineer")],
+        Some((source, Some("e-200"))),
     )
-    .await;
-    let found = async |filter: F| names(backend, &query(&domain, filter, 0, 10)).await.1;
+    .await
+    .unwrap();
+    // externalId is the asking source's own identifier of a user.
+    let found = async |filter: F| names(backend, &query_as(source, &domain, filter)).await.1;
 
     assert_eq!(
         found(compare(Attr::UserName, Op::Eq, "alice.smith")).await,
@@ -660,7 +701,7 @@ pub async fn test_directory_resources_are_carried(backend: &dyn StorageBackend) 
     ];
     for _ in 0..2 {
         backend
-            .import_directory_users(user.id, &carried, test_audit())
+            .import_directory_users(user.id, &carried, &[], test_audit())
             .await
             .expect("the account takes its resources");
     }
@@ -684,7 +725,7 @@ pub async fn test_directory_resources_are_carried(backend: &dyn StorageBackend) 
     let foreign = [resource_of(backend, &other).await];
     assert!(
         backend
-            .import_directory_users(user.id, &foreign, test_audit())
+            .import_directory_users(user.id, &foreign, &[], test_audit())
             .await
             .is_err()
     );
@@ -694,7 +735,7 @@ pub async fn test_directory_resources_are_carried(backend: &dyn StorageBackend) 
     }];
     assert!(matches!(
         backend
-            .import_directory_users(user.id, &taken, test_audit())
+            .import_directory_users(user.id, &taken, &[], test_audit())
             .await,
         Err(sid_core::Error::Conflict(_))
     ));
@@ -707,12 +748,294 @@ pub async fn test_directory_resources_are_carried(backend: &dyn StorageBackend) 
     ];
     assert!(matches!(
         backend
-            .import_directory_users(user.id, &two_live, test_audit())
+            .import_directory_users(user.id, &two_live, &[], test_audit())
             .await,
         Err(sid_core::Error::Validation(_))
     ));
     assert_eq!(resource_of(backend, &user).await, carried[1]);
     assert_eq!(resource_of(backend, &other).await.profile_id, other.id);
+}
+
+/// What `connector` (or nobody) is shown as the externalId of `profile`.
+async fn external_id_shown(
+    backend: &dyn StorageBackend,
+    connector: Option<ProvisioningConnectorId>,
+    domain: &str,
+    profile: &Profile,
+) -> Option<String> {
+    let page = backend
+        .query_directory(&DirectoryQuery {
+            source: connector,
+            ..query(domain, F::Present(Attr::UserName), 0, 10)
+        })
+        .await
+        .unwrap();
+    page.users
+        .iter()
+        .find(|u| u.profile.id == profile.id)
+        .expect("the user is listed")
+        .external_id
+        .clone()
+}
+
+fn live(
+    resource: sid_core::models::DirectoryUserId,
+    connector: ProvisioningConnectorId,
+    external_id: &str,
+) -> DirectorySource {
+    DirectorySource {
+        resource,
+        connector,
+        external_id: Some(external_id.to_owned()),
+        retired: false,
+    }
+}
+
+/// Two sources know one resource by identifiers of their own, and the
+/// account has an employee number besides: each source is shown and matches
+/// only its own identifier (RFC 7643 3.1), nobody else is shown one, and the
+/// employee number is neither. The correlations are carried with the
+/// resources, a repeat changes nothing, and a correlation with a resource
+/// that is not the account's writes nothing.
+pub async fn test_directory_source_identifier_is_the_sources_own(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let (a, b) = (add_source(backend).await, add_source(backend).await);
+    let user = try_add_user(
+        backend,
+        &domain,
+        "known-twice",
+        &[],
+        &[("employee_id", "EMP-7")],
+        Some((a, Some("A-1"))),
+    )
+    .await
+    .unwrap();
+    let other = add_user(backend, &domain, "unknown", &[], &[]).await;
+    let resource = resource_of(backend, &user).await;
+    let sources = [live(resource.id, a, "A-1"), live(resource.id, b, "B-9")];
+    for _ in 0..2 {
+        backend
+            .import_directory_users(user.id, &[resource], &sources, test_audit())
+            .await
+            .expect("the resource takes its sources");
+    }
+
+    for (asking, shown) in [(Some(a), Some("A-1")), (Some(b), Some("B-9")), (None, None)] {
+        assert_eq!(
+            external_id_shown(backend, asking, &domain, &user)
+                .await
+                .as_deref(),
+            shown,
+            "{asking:?}"
+        );
+        assert_eq!(
+            external_id_shown(backend, asking, &domain, &other).await,
+            None
+        );
+    }
+    let found = async |asking: Option<ProvisioningConnectorId>, value: &str| {
+        let q = DirectoryQuery {
+            source: asking,
+            ..query(&domain, compare(Attr::ExternalId, Op::Eq, value), 0, 10)
+        };
+        names(backend, &q).await.1
+    };
+    assert_eq!(found(Some(a), "A-1").await, vec!["known-twice"]);
+    assert_eq!(found(Some(b), "B-9").await, vec!["known-twice"]);
+    assert!(found(Some(b), "A-1").await.is_empty(), "another source's");
+    assert!(found(None, "A-1").await.is_empty(), "nobody's");
+    assert!(found(Some(a), "EMP-7").await.is_empty(), "employee number");
+    let q = DirectoryQuery {
+        source: Some(a),
+        ..query(&domain, F::Present(Attr::ExternalId), 0, 10)
+    };
+    assert_eq!(names(backend, &q).await.1, vec!["known-twice"]);
+
+    assert_eq!(
+        backend
+            .directory_sources(Some(a), &[resource.id])
+            .await
+            .unwrap(),
+        vec![sources[0].clone()]
+    );
+    let mut both = backend
+        .directory_sources(None, &[resource.id])
+        .await
+        .unwrap();
+    both.sort_by_key(|s| s.external_id.clone());
+    assert_eq!(both, sources);
+    assert_eq!(
+        backend.find_directory_source(a, "A-1").await.unwrap(),
+        Some(sources[0].clone())
+    );
+    assert_eq!(backend.find_directory_source(b, "A-1").await.unwrap(), None);
+    let exported = backend.export_directory_sources().await.unwrap();
+    for source in &sources {
+        assert!(exported.contains(source), "{source:?} is exported");
+    }
+
+    let foreign = [live(resource_of(backend, &other).await.id, a, "A-2")];
+    assert!(matches!(
+        backend
+            .import_directory_users(user.id, &[resource], &foreign, test_audit())
+            .await,
+        Err(sid_core::Error::Validation(_))
+    ));
+    assert_eq!(backend.find_directory_source(a, "A-2").await.unwrap(), None);
+}
+
+/// A source names one live resource by an identifier: a second user under
+/// the same identifier of the same source is a conflict and is not created.
+/// Another source may use the same identifier, and a source may know several
+/// users by none.
+pub async fn test_directory_source_identifier_is_unique_per_source(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let (a, b) = (add_source(backend).await, add_source(backend).await);
+    let add = async |name: &str, source, id| {
+        try_add_user(backend, &domain, name, &[], &[], Some((source, id))).await
+    };
+    add("first", a, Some("X-1")).await.unwrap();
+    add("elsewhere", b, Some("X-1")).await.unwrap();
+    let refused = add("second", a, Some("X-1")).await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::Conflict(_))),
+        "{refused:?}"
+    );
+    add("nameless", a, None).await.unwrap();
+    add("nameless-too", a, None).await.unwrap();
+
+    let (total, mut listed) =
+        names(backend, &query(&domain, F::Present(Attr::UserName), 0, 10)).await;
+    listed.sort();
+    assert_eq!(total, 4);
+    assert_eq!(
+        listed,
+        vec!["elsewhere", "first", "nameless", "nameless-too"]
+    );
+}
+
+/// A write through a resource changes only the correlation its source
+/// already has: the identifier follows the write, an identifier the source
+/// gives another user is a conflict that writes nothing, and a source that
+/// does not know the resource gains no correlation by writing to it.
+pub async fn test_directory_source_update_never_creates(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let (a, b) = (add_source(backend).await, add_source(backend).await);
+    let user = try_add_user(backend, &domain, "moved", &[], &[], Some((a, Some("A-1"))))
+        .await
+        .unwrap();
+    try_add_user(backend, &domain, "taken", &[], &[], Some((a, Some("A-3"))))
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &user).await;
+    let update = async |source, id: Option<&str>, given: &str| {
+        let mut profile = backend.get_profile(user.id).await.unwrap().unwrap();
+        profile.given_name = Some(given.to_owned());
+        let write = DirectoryUserWrite::new(DirectoryWriteMode::Update, profile)
+            .through(resource.id)
+            .by_source(source, id.map(str::to_owned));
+        backend.write_directory_user(&write, test_audit()).await
+    };
+    let given = async || {
+        let profile = backend.get_profile(user.id).await.unwrap().unwrap();
+        profile.given_name
+    };
+
+    update(a, Some("A-2"), "Renamed").await.unwrap();
+    assert_eq!(
+        backend.find_directory_source(a, "A-2").await.unwrap(),
+        Some(live(resource.id, a, "A-2"))
+    );
+    assert_eq!(backend.find_directory_source(a, "A-1").await.unwrap(), None);
+
+    let refused = update(a, Some("A-3"), "Refused").await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::Conflict(_))),
+        "{refused:?}"
+    );
+    assert_eq!(given().await.as_deref(), Some("Renamed"));
+    assert_eq!(
+        external_id_shown(backend, Some(a), &domain, &user)
+            .await
+            .as_deref(),
+        Some("A-2")
+    );
+
+    update(b, Some("B-1"), "By another").await.unwrap();
+    assert_eq!(given().await.as_deref(), Some("By another"));
+    assert_eq!(backend.find_directory_source(b, "B-1").await.unwrap(), None);
+    assert!(
+        backend
+            .directory_sources(Some(b), &[resource.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // The source drops its identifier and still knows the resource.
+    update(a, None, "Nameless").await.unwrap();
+    assert_eq!(backend.find_directory_source(a, "A-2").await.unwrap(), None);
+    assert_eq!(
+        backend
+            .directory_sources(Some(a), &[resource.id])
+            .await
+            .unwrap(),
+        vec![DirectorySource {
+            resource: resource.id,
+            connector: a,
+            external_id: None,
+            retired: false,
+        }]
+    );
+}
+
+/// A deleted resource's correlations are retired with it: kept as
+/// provenance, found by no read, and their identifiers free for the source
+/// to give a new user.
+pub async fn test_directory_source_retired_with_the_resource(backend: &dyn StorageBackend) {
+    let domain = domain();
+    let a = add_source(backend).await;
+    let mut user = try_add_user(backend, &domain, "left", &[], &[], Some((a, Some("A-1"))))
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &user).await;
+    user.status = ProfileStatus::Suspended;
+    let mut delete = DirectoryUserWrite::new(DirectoryWriteMode::Update, user)
+        .through(resource.id)
+        .by_source(a, Some("A-1".into()));
+    delete.delete_resource = true;
+    backend
+        .write_directory_user(&delete, test_audit())
+        .await
+        .expect("the resource is deleted");
+
+    assert_eq!(backend.find_directory_source(a, "A-1").await.unwrap(), None);
+    assert!(
+        backend
+            .directory_sources(None, &[resource.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let retired = DirectorySource {
+        retired: true,
+        ..live(resource.id, a, "A-1")
+    };
+    assert!(
+        backend
+            .export_directory_sources()
+            .await
+            .unwrap()
+            .contains(&retired)
+    );
+
+    let again = try_add_user(backend, &domain, "joined", &[], &[], Some((a, Some("A-1"))))
+        .await
+        .expect("the identifier is free again");
+    assert_eq!(
+        backend.find_directory_source(a, "A-1").await.unwrap(),
+        Some(live(resource_of(backend, &again).await.id, a, "A-1"))
+    );
 }
 
 /// Closed and purged profiles are retired records, not directory users.

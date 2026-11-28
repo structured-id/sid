@@ -263,6 +263,7 @@ fn create_user_request(user_name: &str) -> proto::ScimCreateUserRequest {
         department: "Engineering".into(),
         title: "Engineer".into(),
         active: true,
+        employee_number: String::new(),
     }
 }
 
@@ -339,7 +340,9 @@ async fn test_create_user_stores_profile_and_identifiers() {
     // Verify metadata (org-specific fields only, NOT name — name is in Profile)
     let metadata = storage.list_profile_metadata(profile_id).await.unwrap();
     let keys: Vec<&str> = metadata.iter().map(|m| m.key.as_str()).collect();
-    assert!(keys.contains(&"employee_id"));
+    // externalId is the creating source's identifier of the user, kept with
+    // its correlation and never as an attribute of the account.
+    assert!(!keys.contains(&"employee_id"));
     assert!(keys.contains(&"department"));
     assert!(keys.contains(&"title"));
     // given_name/family_name are Profile fields, NOT metadata
@@ -741,6 +744,7 @@ async fn test_replace_user_updates_all_fields() {
             department: "Product".into(),
             title: "Manager".into(),
             active: true,
+            employee_number: "701985".into(),
         }))
         .await
         .unwrap()
@@ -749,6 +753,9 @@ async fn test_replace_user_updates_all_fields() {
     assert_eq!(replaced.display_name, "Updated Name");
     assert_eq!(replaced.department, "Product");
     assert_eq!(replaced.title, "Manager");
+    // The source that created the user replaces its own identifier of it.
+    assert_eq!(replaced.external_id, "EMP-NEW");
+    assert_eq!(replaced.employee_number, "701985");
     assert_eq!(replaced.emails.len(), 1);
     assert_eq!(
         replaced.emails[0].value,
@@ -793,6 +800,189 @@ async fn test_replace_user_updates_all_fields() {
         0,
         "should have 0 ProfilePhones after replace with empty phones"
     );
+}
+
+// ─── externalId ───
+
+/// `externalId` is the asking client's own identifier of a user (RFC 7643
+/// 3.1): the source that created the user is shown it and finds the user by
+/// it, another source of the same directory sees none, matches nothing by
+/// it, gains none by writing to the user, and may use the same value for a
+/// user of its own. One source gives a value to one user (RFC 7644 3.3,
+/// `uniqueness`), may change it, and has it back when the user is deleted.
+#[tokio::test]
+async fn test_external_id_is_each_sources_own() {
+    let (service, storage, _, directory) = setup_directory().await;
+    let other_source = connector_secret(&storage, directory, &SCIM_ACTIONS).await;
+    let username = unique_username();
+    let external_id = format!("EMP-{username}");
+    let found_by = async |token: Option<&str>, value: &str| {
+        let request = proto::ScimListUsersRequest {
+            filter: format!(r#"externalId eq "{value}""#),
+            start_index: 1,
+            count: 100,
+        };
+        let request = match token {
+            Some(token) => with_token(request, token),
+            None => provisioned(request),
+        };
+        service
+            .list_users(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .resources
+    };
+
+    // The employee number is a third value: the user's own attribute, the
+    // same for every source, and neither source's identifier.
+    let employee_number = format!("N-{username}");
+    let created = service
+        .create_user(provisioned(proto::ScimCreateUserRequest {
+            employee_number: employee_number.clone(),
+            ..create_user_request(&username)
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(created.external_id, external_id);
+    assert_eq!(created.employee_number, employee_number);
+    let get = proto::ScimGetUserRequest {
+        id: created.id.clone(),
+    };
+    let own = service
+        .get_user(provisioned(get.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(own.external_id, external_id);
+    assert_eq!(own.employee_number, employee_number);
+    let foreign = service
+        .get_user(with_token(get.clone(), &other_source))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(foreign.external_id, "");
+    assert_eq!(foreign.employee_number, employee_number);
+    assert!(found_by(None, &employee_number).await.is_empty());
+
+    let listed = found_by(None, &external_id).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, created.id);
+    assert_eq!(listed[0].external_id, external_id);
+    assert!(found_by(Some(&other_source), &external_id).await.is_empty());
+
+    // A source that does not know the user gains no identifier of it by
+    // replacing it, and the creating source keeps its own.
+    let replaced = service
+        .replace_user(with_token(
+            proto::ScimReplaceUserRequest {
+                id: created.id.clone(),
+                external_id: "OTHER-1".into(),
+                user_name: username.clone(),
+                display_name: "Replaced".into(),
+                emails: vec![],
+                phone_numbers: vec![],
+                active: true,
+                employee_number: format!("{employee_number}-2"),
+                ..Default::default()
+            },
+            &other_source,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(replaced.external_id, "");
+    // The employee number it wrote is the user's, for every source.
+    assert_eq!(replaced.employee_number, format!("{employee_number}-2"));
+    let own = service
+        .get_user(provisioned(get.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(own.employee_number, format!("{employee_number}-2"));
+    assert_eq!(own.external_id, external_id);
+    assert!(found_by(Some(&other_source), "OTHER-1").await.is_empty());
+    assert_eq!(found_by(None, &external_id).await.len(), 1);
+
+    // The same value names one user per source.
+    let taken = service
+        .create_user(provisioned(proto::ScimCreateUserRequest {
+            external_id: external_id.clone(),
+            ..create_user_request(&unique_username())
+        }))
+        .await
+        .expect_err("the source already knows a user by this identifier");
+    assert_eq!(taken.code(), tonic::Code::AlreadyExists);
+    let (reason, _, metadata) = sid_infra::grpc_error::extract_error_info(&taken).unwrap();
+    assert_eq!(reason, "PROFILE_ALREADY_EXISTS");
+    assert_eq!(
+        metadata.get("scimType").map(String::as_str),
+        Some("uniqueness")
+    );
+    let elsewhere = service
+        .create_user(with_token(
+            proto::ScimCreateUserRequest {
+                external_id: external_id.clone(),
+                ..create_user_request(&unique_username())
+            },
+            &other_source,
+        ))
+        .await
+        .expect("another source's identifiers are its own")
+        .into_inner();
+    assert_eq!(elsewhere.external_id, external_id);
+    let listed = found_by(Some(&other_source), &external_id).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, elsewhere.id);
+
+    // The source renames its identifier; the old value finds nothing.
+    let renamed = format!("{external_id}-2");
+    let patched = service
+        .patch_user(provisioned(proto::ScimPatchUserRequest {
+            id: created.id.clone(),
+            operations: vec![proto::ScimPatchOp {
+                op: "replace".into(),
+                path: "externalId".into(),
+                value: renamed.clone(),
+            }],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(patched.external_id, renamed);
+    assert!(found_by(None, &external_id).await.is_empty());
+    // A change that does not name externalId leaves it.
+    let patched = service
+        .patch_user(provisioned(proto::ScimPatchUserRequest {
+            id: created.id.clone(),
+            operations: vec![proto::ScimPatchOp {
+                op: "replace".into(),
+                path: "title".into(),
+                value: "Lead".into(),
+            }],
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(patched.external_id, renamed);
+
+    // A deleted user gives its identifier back to the source.
+    service
+        .delete_user(provisioned(proto::ScimDeleteUserRequest {
+            id: created.id.clone(),
+        }))
+        .await
+        .unwrap();
+    let again = service
+        .create_user(provisioned(proto::ScimCreateUserRequest {
+            external_id: renamed.clone(),
+            ..create_user_request(&unique_username())
+        }))
+        .await
+        .expect("the identifier is free again")
+        .into_inner();
+    assert_eq!(again.external_id, renamed);
 }
 
 // ─── PatchUser ───
@@ -1642,7 +1832,18 @@ async fn test_schemas() {
         .unwrap()
         .into_inner();
 
-    assert_eq!(response.resources.len(), 2);
+    assert_eq!(response.resources.len(), 3);
+    // The enterprise extension's attributes are served under its own URI.
+    let enterprise: Vec<&str> = response
+        .resources
+        .iter()
+        .find(|s| s.id == "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User")
+        .expect("the enterprise User schema is listed")
+        .attributes
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+    assert_eq!(enterprise, ["employeeNumber", "department"]);
     let user_schema = response
         .resources
         .iter()
@@ -2150,6 +2351,7 @@ async fn test_scim_deactivation_ends_sessions_and_pats() {
             department: replace.department,
             title: replace.title,
             active: false,
+            employee_number: replace.employee_number,
         }))
         .await
         .unwrap();

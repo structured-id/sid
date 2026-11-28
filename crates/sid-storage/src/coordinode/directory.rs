@@ -13,9 +13,9 @@ use sid_core::models::directory_query::metadata_keys;
 use sid_core::models::pat::{PatId, PatStatus, PersonalAccessToken};
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter, DirectoryGroupWrite, DirectoryOperator as Op,
-    DirectoryPage, DirectoryQuery, DirectoryResource, DirectoryUserId, DirectoryUserWrite,
-    DirectoryWriteMode, MutationContext, PrincipalType, Profile, ProfileId, ProfileMetadata,
-    ProfileStatus, Session,
+    DirectoryPage, DirectoryQuery, DirectoryResource, DirectorySource, DirectoryUserId,
+    DirectoryUserWrite, DirectoryWriteMode, MutationContext, PrincipalType, Profile, ProfileId,
+    ProfileMetadata, ProfileStatus, ProvisioningConnectorId, Session, SourceWrite,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -265,11 +265,145 @@ fn hold_resource(
             .with("revision", Value::Int(revision))
             .with("deleted_at", opt_time(deleted_at)),
     )?;
+    if delete {
+        // Its sources keep their provenance and give their identifiers up.
+        tx.run(
+            "MATCH (s:SidDirectorySource) WHERE s.resource_id = $id SET s.retired = true",
+            Params::default().with("id", uuid(&id.0)),
+        )?;
+    }
     Ok(())
 }
 
-/// Delete in `tx` the metadata, tokens and directory resources of `profile`.
+// === Source correlations ===
+
+const SOURCE: &str = "s.resource_id AS resource_id, s.connector_id AS connector_id,
+    s.external_id AS external_id, s.retired AS retired";
+
+fn source(row: &Row) -> SidResult<DirectorySource> {
+    Ok(DirectorySource {
+        resource: DirectoryUserId(super::get_uuid(row, "resource_id")?),
+        connector: get_id(row, "connector_id")?,
+        external_id: get_opt_text(row, "external_id")?,
+        retired: super::get_bool(row, "retired")?,
+    })
+}
+
+fn sources_where(
+    tx: &Statements<'_>,
+    filter: &str,
+    value: Value,
+) -> SidResult<Vec<DirectorySource>> {
+    let rows = tx.run(
+        &format!("MATCH (s:SidDirectorySource) WHERE {filter} RETURN {SOURCE}"),
+        Params::default().with("value", value),
+    )?;
+    rows.iter().map(source).collect()
+}
+
+/// The correlations of `connector`, the live ones and the retired.
+fn sources_of_connector(
+    tx: &Statements<'_>,
+    connector: ProvisioningConnectorId,
+) -> SidResult<Vec<DirectorySource>> {
+    sources_where(tx, "s.connector_id = $value", uuid(&connector.into_uuid()))
+}
+
+fn source_pair(resource: DirectoryUserId, connector: ProvisioningConnectorId) -> SidResult<Value> {
+    key(&[resource.0.as_bytes(), connector.into_uuid().as_bytes()])
+}
+
+/// An identifier `connector` already gives another live resource is
+/// `Conflict`.
+fn check_identifier(
+    tx: &Statements<'_>,
+    connector: ProvisioningConnectorId,
+    resource: DirectoryUserId,
+    external_id: Option<&str>,
+) -> SidResult<()> {
+    let Some(external_id) = external_id else {
+        return Ok(());
+    };
+    if external_id.is_empty() {
+        return Err(SidError::Validation(
+            "a source identifier is not empty".into(),
+        ));
+    }
+    let taken = sources_of_connector(tx, connector)?.into_iter().any(|s| {
+        !s.retired && s.resource != resource && s.external_id.as_deref() == Some(external_id)
+    });
+    if taken {
+        return Err(SidError::Conflict(
+            "the source already names another resource by this identifier".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn create_source(tx: &Statements<'_>, s: &DirectorySource) -> SidResult<()> {
+    tx.run(
+        "CREATE (s:SidDirectorySource {pair: $pair, resource_id: $resource,
+            connector_id: $connector, external_id: $external_id, retired: $retired})",
+        Params::default()
+            .with("pair", source_pair(s.resource, s.connector)?)
+            .with("resource", uuid(&s.resource.0))
+            .with("connector", uuid(&s.connector.into_uuid()))
+            .with("external_id", opt_text(s.external_id.as_deref()))
+            .with("retired", Value::Bool(s.retired)),
+    )?;
+    Ok(())
+}
+
+/// Record what the write's source knows of the resource `profile` has just
+/// been given.
+fn record_source(tx: &Statements<'_>, profile: ProfileId, write: &SourceWrite) -> SidResult<()> {
+    let resource = live_resource(tx, profile)?
+        .ok_or_else(|| SidError::Storage(format!("profile {profile} has no resource")))?
+        .id;
+    check_identifier(tx, write.connector, resource, write.external_id.as_deref())?;
+    create_source(
+        tx,
+        &DirectorySource {
+            resource,
+            connector: write.connector,
+            external_id: write.external_id.clone(),
+            retired: false,
+        },
+    )
+}
+
+/// Give the correlation the write's source already has with `resource` the
+/// identifier the write carries. A source without one is not given one: no
+/// source takes a resource over by writing to it.
+fn update_source(
+    tx: &Statements<'_>,
+    resource: DirectoryUserId,
+    write: &SourceWrite,
+) -> SidResult<()> {
+    let pair = source_pair(resource, write.connector)?;
+    let held = sources_where(tx, "s.pair = $value", pair.clone())?;
+    if !held.iter().any(|s| !s.retired) {
+        return Ok(());
+    }
+    check_identifier(tx, write.connector, resource, write.external_id.as_deref())?;
+    tx.run(
+        "MATCH (s:SidDirectorySource) WHERE s.pair = $pair SET s.external_id = $external_id",
+        Params::default()
+            .with("pair", pair)
+            .with("external_id", opt_text(write.external_id.as_deref())),
+    )?;
+    Ok(())
+}
+
+/// Delete in `tx` the metadata, tokens and directory resources of `profile`,
+/// with the correlations of those resources.
 pub(super) fn delete_profile_records(tx: &Statements<'_>, profile: ProfileId) -> SidResult<()> {
+    for resource in resources_where(tx, "d.profile_id = $value", bin(profile.as_bytes()))? {
+        tx.run(
+            "MATCH (s:SidDirectorySource) WHERE s.resource_id = $id DETACH DELETE s",
+            Params::default().with("id", uuid(&resource.id.0)),
+        )?;
+    }
     for query in [
         "MATCH (d:SidDirectoryUser) WHERE d.profile_id = $id DETACH DELETE d",
         "MATCH (m:SidProfileMetadata) WHERE m.profile_id = $id DETACH DELETE m",
@@ -297,6 +431,9 @@ struct Candidate {
     emails: Vec<String>,
     phones: Vec<String>,
     metadata: Vec<ProfileMetadata>,
+    /// The asking source's own identifier of the user's resource, if any:
+    /// another source's is never compared.
+    external_id: Option<String>,
 }
 
 impl Candidate {
@@ -336,7 +473,7 @@ impl Candidate {
                     || non_empty(&self.profile.family_name).is_some();
                 if named { self.display() } else { None }
             }
-            Attr::ExternalId => self.metadata(metadata_keys::EXTERNAL_ID),
+            Attr::ExternalId => self.external_id.clone(),
             Attr::Title => self.metadata(metadata_keys::TITLE),
             Attr::Department => self.metadata(metadata_keys::DEPARTMENT),
             Attr::Active | Attr::UserName | Attr::Email | Attr::Phone => None,
@@ -437,6 +574,14 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
     let suffix = format!("#{}", query.org_domain);
     let mut matching = Vec::new();
     let mut resources = Vec::new();
+    // The asking source's live correlations, read once for the whole scan.
+    let sources: Vec<DirectorySource> = match query.source {
+        Some(connector) => sources_of_connector(tx, connector)?
+            .into_iter()
+            .filter(|s| !s.retired)
+            .collect(),
+        None => Vec::new(),
+    };
     for profile in super::profile::profiles(tx, "", Params::default())? {
         // Retired profiles (closed, purged) are never part of the directory.
         if matches!(
@@ -453,6 +598,10 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
         resources.push(live);
         let principals = super::principal::held_by(tx, profile.id)?;
         let candidate = Candidate {
+            external_id: sources
+                .iter()
+                .find(|s| s.resource == live.id)
+                .and_then(|s| s.external_id.clone()),
             usernames: principals
                 .iter()
                 .filter(|p| p.principal_type == PrincipalType::Username)
@@ -495,7 +644,9 @@ fn query_directory(tx: &Statements<'_>, query: &DirectoryQuery) -> SidResult<Dir
     }
     Ok(DirectoryPage {
         total,
-        users: crate::directory_query::assemble(profiles, resources, principals, emails, metadata)?,
+        users: crate::directory_query::assemble(
+            profiles, resources, sources, principals, emails, metadata,
+        )?,
     })
 }
 
@@ -519,13 +670,19 @@ fn write_user(
                     "a directory create is given no resource".into(),
                 ));
             }
-            super::profile::insert(tx, &write.profile)?
+            super::profile::insert(tx, &write.profile)?;
+            if let Some(source) = &write.source {
+                record_source(tx, profile_id, source)?;
+            }
         }
         DirectoryWriteMode::Update => {
             // The resource first: a deletion that committed since the caller
             // read it refuses the write as not found.
             if let Some(resource) = write.resource {
                 hold_resource(tx, resource, profile_id, write.delete_resource)?;
+                if let Some(source) = write.source.as_ref().filter(|_| !write.delete_resource) {
+                    update_source(tx, resource, source)?;
+                }
             }
             // A missing account or one changed since it was read refuses
             // the whole write.
@@ -679,6 +836,7 @@ impl CoordinodeBackend {
         &self,
         profile_id: ProfileId,
         resources: &[DirectoryResource],
+        sources: &[DirectorySource],
         ctx: MutationContext,
     ) -> SidResult<()> {
         if resources.iter().any(|r| r.profile_id != profile_id)
@@ -688,7 +846,16 @@ impl CoordinodeBackend {
                 "an account's directory resources are its own, one of them live at most".into(),
             ));
         }
+        if sources
+            .iter()
+            .any(|s| !resources.iter().any(|r| r.id == s.resource))
+        {
+            return Err(SidError::Validation(
+                "a directory source names a resource of the account".into(),
+            ));
+        }
         let resources = resources.to_vec();
+        let sources = sources.to_vec();
         self.mutate(format!("profile:{profile_id}"), ctx, move |tx| {
             // The resource assigned when the account was restored gives way
             // to the ones the account had.
@@ -706,6 +873,19 @@ impl CoordinodeBackend {
                     )));
                 }
             }
+            // The sources of the resources it has and of the ones it takes
+            // are replaced by exactly the ones given.
+            let held = resources_where(tx, "d.profile_id = $value", bin(profile_id.as_bytes()))?;
+            for id in held
+                .iter()
+                .map(|r| r.id)
+                .chain(resources.iter().map(|r| r.id))
+            {
+                tx.run(
+                    "MATCH (s:SidDirectorySource) WHERE s.resource_id = $id DETACH DELETE s",
+                    Params::default().with("id", uuid(&id.0)),
+                )?;
+            }
             tx.run(
                 "MATCH (d:SidDirectoryUser) WHERE d.profile_id = $id DETACH DELETE d",
                 Params::default().with("id", bin(profile_id.as_bytes())),
@@ -713,7 +893,61 @@ impl CoordinodeBackend {
             for r in &resources {
                 create_resource(tx, r)?;
             }
+            for s in &sources {
+                if !s.retired {
+                    check_identifier(tx, s.connector, s.resource, s.external_id.as_deref())?;
+                }
+                create_source(tx, s)?;
+            }
             Ok(())
+        })
+        .await
+    }
+
+    pub(super) async fn directory_sources(
+        &self,
+        connector: Option<ProvisioningConnectorId>,
+        resources: &[DirectoryUserId],
+    ) -> SidResult<Vec<DirectorySource>> {
+        let resources = resources.to_vec();
+        self.read(move |tx| {
+            let mut found = Vec::new();
+            for resource in &resources {
+                found.extend(
+                    sources_where(tx, "s.resource_id = $value", uuid(&resource.0))?
+                        .into_iter()
+                        .filter(|s| !s.retired && connector.is_none_or(|c| c == s.connector)),
+                );
+            }
+            found.sort_by_key(|s| (s.resource, s.connector.into_uuid()));
+            Ok(found)
+        })
+        .await
+    }
+
+    pub(super) async fn find_directory_source(
+        &self,
+        connector: ProvisioningConnectorId,
+        external_id: &str,
+    ) -> SidResult<Option<DirectorySource>> {
+        let external_id = external_id.to_owned();
+        self.read(move |tx| {
+            Ok(sources_of_connector(tx, connector)?
+                .into_iter()
+                .find(|s| !s.retired && s.external_id.as_deref() == Some(external_id.as_str())))
+        })
+        .await
+    }
+
+    pub(super) async fn export_directory_sources(&self) -> SidResult<Vec<DirectorySource>> {
+        self.read(move |tx| {
+            let rows = tx.run(
+                &format!("MATCH (s:SidDirectorySource) RETURN {SOURCE}"),
+                Params::default(),
+            )?;
+            let mut all = rows.iter().map(source).collect::<SidResult<Vec<_>>>()?;
+            all.sort_by_key(|s| (s.resource, s.connector.into_uuid()));
+            Ok(all)
         })
         .await
     }
