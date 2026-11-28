@@ -789,6 +789,13 @@ pub async fn test_directory_membership_follows_its_grounds(backend: &dyn Storage
     assert!(belongs().await);
     relationship(None, true).await;
     assert!(!belongs().await, "a deleted relationship kept its grant");
+    // A source's assignment made when no live relationship is left rests
+    // on nothing: it is on record and gives no membership.
+    assign(Some(second), true).await;
+    assert!(
+        !belongs().await,
+        "an assignment without a live relationship gave membership"
+    );
 }
 
 /// The live resource of `profile`.

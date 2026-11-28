@@ -360,14 +360,20 @@ fn settle_member(
 ) -> SidResult<()> {
     let pair = member_pair(group_id, profile)?;
     let origins = tx.run(
-        "MATCH (o:SidGroupOrigin) WHERE o.pair = $pair RETURN o.resource_id AS resource_id",
+        "MATCH (o:SidGroupOrigin) WHERE o.pair = $pair
+         RETURN o.local AS local, o.resource_id AS resource_id",
         Params::default().with("pair", pair.clone()),
     )?;
     let mut stands = false;
     for row in &origins {
-        let Some(resource) = super::get_opt_uuid(row, "resource_id")? else {
+        if super::get_bool(row, "local")? {
             stands = true;
             break;
+        }
+        // A connector's assignment made when the member had no live
+        // resource rests on nothing.
+        let Some(resource) = super::get_opt_uuid(row, "resource_id")? else {
+            continue;
         };
         let found = tx.run(
             "MATCH (d:SidDirectoryUser) WHERE d.id = $id

@@ -704,7 +704,8 @@ async fn settle_member(
             "(SELECT 1 FROM group_member_origins o
               LEFT JOIN directory_users d ON d.id = o.resource_id
               WHERE o.group_id = ?1 AND o.profile_id = ?2
-                AND (o.resource_id IS NULL OR (d.deleted_at IS NULL AND d.active = 1)))"
+                AND (o.connector_id = zeroblob(16)
+                     OR (d.id IS NOT NULL AND d.deleted_at IS NULL AND d.active = 1)))"
         };
     }
     sqlx::query(concat!(
