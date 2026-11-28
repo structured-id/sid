@@ -33,6 +33,7 @@ struct ConnectorRow {
     client_id: String,
     display_name: String,
     state: String,
+    directory_rights: i32,
     revision: i64,
     created_at: PgTime,
     updated_at: PgTime,
@@ -48,6 +49,7 @@ impl ConnectorRow {
             client_id: self.client_id,
             display_name: self.display_name,
             state: stored::<ConnectorState>(&self.state)?,
+            directory_rights: super::directory::rights(self.directory_rights)?,
             revision: self.revision,
             created_at: self.created_at.jiff(),
             updated_at: self.updated_at.jiff(),
@@ -195,8 +197,8 @@ impl PostgresBackend {
         sqlx::query(
             "INSERT INTO provisioning_connectors
                  (id, org_id, direction, client_id, display_name, state, revision,
-                  created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                  created_at, updated_at, directory_rights)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(c.id)
         .bind(c.org_id)
@@ -207,6 +209,7 @@ impl PostgresBackend {
         .bind(c.revision)
         .bind(c.created_at.pg())
         .bind(c.updated_at.pg())
+        .bind(c.directory_rights.bits())
         .execute(&mut *tx)
         .await
         .map_err(|e| insert_error("provisioning connector", e))?;

@@ -142,7 +142,13 @@ async fn hold_resource(
     Ok(())
 }
 
-pub(super) const SOURCE: &str = "resource_id, connector_id, external_id, retired";
+pub(super) const SOURCE: &str = "resource_id, connector_id, external_id, retired, created, managed";
+
+/// A stored set of rights; bits that are no right are a broken record.
+pub(super) fn rights(bits: i32) -> SidResult<sid_core::models::DirectoryRights> {
+    sid_core::models::DirectoryRights::from_bits(bits)
+        .ok_or_else(|| SidError::Storage(format!("directory rights: unknown bits in {bits}")))
+}
 
 pub(super) fn source(row: &sqlx::sqlite::SqliteRow) -> SidResult<DirectorySource> {
     use sqlx::Row;
@@ -152,6 +158,8 @@ pub(super) fn source(row: &sqlx::sqlite::SqliteRow) -> SidResult<DirectorySource
         connector: row.try_get("connector_id").map_err(read)?,
         external_id: row.try_get("external_id").map_err(read)?,
         retired: row.try_get("retired").map_err(read)?,
+        created: row.try_get("created").map_err(read)?,
+        managed: rights(row.try_get("managed").map_err(read)?)?,
     })
 }
 
@@ -173,8 +181,9 @@ async fn record_source(
     source: &SourceWrite,
 ) -> SidResult<()> {
     sqlx::query(
-        "INSERT INTO directory_user_sources (resource_id, connector_id, external_id)
-         SELECT id, ?, ? FROM directory_users WHERE profile_id = ? AND deleted_at IS NULL",
+        // The creator is recorded as such and assigned nothing by creating.
+        "INSERT INTO directory_user_sources (resource_id, connector_id, external_id, created)
+         SELECT id, ?, ?, 1 FROM directory_users WHERE profile_id = ? AND deleted_at IS NULL",
     )
     .bind(source.connector)
     .bind(source.external_id.as_deref())
@@ -920,13 +929,16 @@ impl SqliteBackend {
         }
         for s in sources {
             sqlx::query(
-                "INSERT INTO directory_user_sources (resource_id, connector_id, external_id, retired)
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO directory_user_sources
+                     (resource_id, connector_id, external_id, retired, created, managed)
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(s.resource.0)
             .bind(s.connector)
             .bind(s.external_id.as_deref())
             .bind(s.retired)
+            .bind(s.created)
+            .bind(s.managed.bits())
             .execute(&mut *tx)
             .await
             .map_err(source_error)?;

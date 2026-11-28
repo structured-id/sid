@@ -1101,6 +1101,260 @@ pub async fn test_directory_source_retired_with_the_resource(backend: &dyn Stora
     );
 }
 
+/// The connector `id` as stored.
+async fn connector(
+    backend: &dyn StorageBackend,
+    id: ProvisioningConnectorId,
+) -> ProvisioningConnector {
+    backend
+        .get_provisioning_connector(id)
+        .await
+        .unwrap()
+        .expect("the connector is stored")
+}
+
+/// What a connector manages is changed only by a command based on its
+/// current revision, and every change moves the revision. A directory-wide
+/// selection and an assignment of one user are kept apart: withdrawing the
+/// user leaves the selection. An assignment makes the connector a source of
+/// the user without an identifier, keeps the identifier of a source that has
+/// one, and never marks it the creator. A withdrawal keeps the correlation;
+/// one that finds no assignment changes nothing, the revision included. A
+/// command repeated after the connector moved is stale and restores or
+/// cancels nothing.
+pub async fn test_directory_management_follows_the_revision(backend: &dyn StorageBackend) {
+    use sid_core::models::{DirectoryRight as R, ManagementOutcome as Outcome};
+    let domain = domain();
+    let (a, b) = (add_source(backend).await, add_source(backend).await);
+    let user = try_add_user(
+        backend,
+        &domain,
+        "assigned",
+        &[],
+        &[],
+        Some((a, Some("A-1"))),
+    )
+    .await
+    .unwrap();
+    let other = add_user(backend, &domain, "never-assigned", &[], &[]).await;
+    let resource = resource_of(backend, &user).await.id;
+    let other_resource = resource_of(backend, &other).await.id;
+    let of_b = async || {
+        backend
+            .directory_sources(Some(b), &[resource])
+            .await
+            .unwrap()
+    };
+
+    // The directory-wide selection.
+    let first = connector(backend, b).await;
+    assert!(first.directory_rights.is_empty());
+    let wide = DirectoryRights::of(&[R::EmployeeNumber]);
+    assert!(
+        backend
+            .set_directory_rights(b, first.revision, wide, test_audit())
+            .await
+            .unwrap()
+    );
+    let selected = connector(backend, b).await;
+    assert_eq!(selected.directory_rights, wide);
+    assert_eq!(selected.revision, first.revision + 1);
+    // The same command again names a revision the connector moved past.
+    assert!(
+        !backend
+            .set_directory_rights(b, first.revision, DirectoryRights::NONE, test_audit())
+            .await
+            .unwrap()
+    );
+    assert_eq!(connector(backend, b).await, selected);
+
+    // One user, assigned.
+    let titles = DirectoryRights::of(&[R::Title]);
+    let assign = async |revision: i64| {
+        backend
+            .manage_directory_user(b, revision, resource, titles, test_audit())
+            .await
+            .unwrap()
+    };
+    assert_eq!(assign(first.revision).await, Outcome::Stale);
+    assert!(of_b().await.is_empty(), "a stale assignment wrote nothing");
+    assert_eq!(assign(selected.revision).await, Outcome::Applied);
+    let assigned = connector(backend, b).await;
+    assert_eq!(assigned.revision, selected.revision + 1);
+    assert_eq!(
+        of_b().await,
+        vec![DirectorySource {
+            resource,
+            connector: b,
+            external_id: None,
+            retired: false,
+            created: false,
+            managed: titles,
+        }]
+    );
+
+    // A withdrawal that finds no assignment changes nothing.
+    assert_eq!(
+        backend
+            .manage_directory_user(
+                b,
+                assigned.revision,
+                other_resource,
+                DirectoryRights::NONE,
+                test_audit()
+            )
+            .await
+            .unwrap(),
+        Outcome::NothingToWithdraw
+    );
+    assert_eq!(connector(backend, b).await, assigned);
+
+    // The creating source is assigned its user: its identifier and its
+    // creator mark stay.
+    let a_now = connector(backend, a).await;
+    assert_eq!(
+        backend
+            .manage_directory_user(
+                a,
+                a_now.revision,
+                resource,
+                DirectoryRights::of(&[R::Name]),
+                test_audit()
+            )
+            .await
+            .unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        backend.find_directory_source(a, "A-1").await.unwrap(),
+        Some(DirectorySource {
+            managed: DirectoryRights::of(&[R::Name]),
+            ..creator(resource, a, "A-1")
+        })
+    );
+
+    // Withdrawn: the correlation stays, the directory-wide selection too.
+    let withdraw = async |revision: i64| {
+        backend
+            .manage_directory_user(b, revision, resource, DirectoryRights::NONE, test_audit())
+            .await
+            .unwrap()
+    };
+    assert_eq!(withdraw(selected.revision).await, Outcome::Stale);
+    assert_eq!(of_b().await[0].managed, titles);
+    assert_eq!(withdraw(assigned.revision).await, Outcome::Applied);
+    let withdrawn = connector(backend, b).await;
+    assert_eq!(withdrawn.revision, assigned.revision + 1);
+    assert_eq!(withdrawn.directory_rights, wide);
+    let kept = of_b().await;
+    assert_eq!(kept.len(), 1, "the provenance stays");
+    assert!(kept[0].managed.is_empty());
+    // Neither the old assignment nor the old withdrawal acts again.
+    assert_eq!(assign(selected.revision).await, Outcome::Stale);
+    assert_eq!(withdraw(assigned.revision).await, Outcome::Stale);
+    assert!(of_b().await[0].managed.is_empty());
+    assert_eq!(connector(backend, b).await, withdrawn);
+
+    // A user that is unknown or deleted is assigned to nobody.
+    let unknown = sid_core::models::DirectoryUserId::new();
+    let refused = backend
+        .manage_directory_user(b, withdrawn.revision, unknown, titles, test_audit())
+        .await;
+    assert!(
+        matches!(refused, Err(sid_core::Error::NotFound(_))),
+        "{refused:?}"
+    );
+    assert_eq!(connector(backend, b).await, withdrawn);
+}
+
+/// A write a connector was authorized for commits only while what the
+/// connector manages is as it was then: a selection or an assignment made
+/// in between refuses the write whole.
+pub async fn test_directory_management_change_fences_a_write(backend: &dyn StorageBackend) {
+    use sid_core::models::{
+        ActorFence, ConnectorCredentialKind, DirectoryRight as R, ProvisioningCredential,
+    };
+    let domain = domain();
+    let a = add_source(backend).await;
+    let credential =
+        ProvisioningCredential::new(a, ConnectorCredentialKind::ScimBearer, "f".repeat(64));
+    assert!(
+        backend
+            .add_provisioning_credential(&credential, test_audit())
+            .await
+            .unwrap()
+    );
+    let user = try_add_user(backend, &domain, "fenced", &[], &[], Some((a, None)))
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &user).await.id;
+    // The connector as a request authenticated it.
+    let authorized = connector(backend, a).await;
+    let write = |given: &str, profile: &Profile| {
+        let mut changed = profile.clone();
+        changed.given_name = Some(given.to_owned());
+        DirectoryUserWrite::new(DirectoryWriteMode::Update, changed).through(resource)
+    };
+    let fenced = |revision: i64| {
+        test_audit().fenced_by(ActorFence::Connector {
+            connector: a,
+            revision,
+            credential: credential.id,
+        })
+    };
+
+    for change in ["selection", "assignment"] {
+        let before = connector(backend, a).await;
+        match change {
+            "selection" => assert!(
+                backend
+                    .set_directory_rights(
+                        a,
+                        before.revision,
+                        DirectoryRights::of(&[R::Name]),
+                        test_audit()
+                    )
+                    .await
+                    .unwrap()
+            ),
+            _ => assert_eq!(
+                backend
+                    .manage_directory_user(
+                        a,
+                        before.revision,
+                        resource,
+                        DirectoryRights::NONE.with(R::Title),
+                        test_audit()
+                    )
+                    .await
+                    .unwrap(),
+                sid_core::models::ManagementOutcome::Applied
+            ),
+        }
+        let stored = backend.get_profile(user.id).await.unwrap().unwrap();
+        let refused = backend
+            .write_directory_user(&write("Stale", &stored), fenced(before.revision))
+            .await;
+        assert!(
+            matches!(refused, Err(sid_core::Error::Fenced(_))),
+            "{change}: {refused:?}"
+        );
+        assert_eq!(
+            backend.get_profile(user.id).await.unwrap().unwrap(),
+            stored,
+            "{change}: nothing was written"
+        );
+    }
+    // Authorized again at the current revision, the write commits.
+    let stored = backend.get_profile(user.id).await.unwrap().unwrap();
+    let current = connector(backend, a).await;
+    assert!(current.revision > authorized.revision);
+    backend
+        .write_directory_user(&write("Current", &stored), fenced(current.revision))
+        .await
+        .expect("a write at the current revision commits");
+}
+
 /// Closed and purged profiles are retired records, not directory users.
 pub async fn test_directory_omits_retired_profiles(backend: &dyn StorageBackend) {
     let domain = domain();

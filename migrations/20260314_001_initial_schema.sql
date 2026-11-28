@@ -699,6 +699,9 @@ CREATE TABLE provisioning_connectors (
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
     client_id text NOT NULL,
+    -- What the connector may change of every user of the directory, a set
+    -- of rights as bits; 0 when it manages only users assigned one by one.
+    directory_rights integer DEFAULT 0 NOT NULL,
     CONSTRAINT provisioning_connectors_direction_check CHECK ((direction = ANY (ARRAY['inbound'::text, 'outbound'::text]))),
     CONSTRAINT provisioning_connectors_revision_check CHECK ((revision >= 1)),
     CONSTRAINT provisioning_connectors_state_check CHECK ((state = ANY (ARRAY['active'::text, 'disabled'::text, 'retired'::text]))),
@@ -987,6 +990,11 @@ CREATE TABLE directory_user_sources (
     -- Set with the resource's deletion: the provenance stays, the source's
     -- identifier is free for a new resource.
     retired boolean DEFAULT false NOT NULL,
+    -- Whether this source created the resource: provenance, no authority.
+    created boolean DEFAULT false NOT NULL,
+    -- What the connector was assigned of this user, a set of rights as
+    -- bits; 0 once withdrawn or when it was never assigned.
+    managed integer DEFAULT 0 NOT NULL,
     CONSTRAINT directory_user_sources_pkey PRIMARY KEY (resource_id, connector_id),
     CONSTRAINT directory_user_sources_external_id_check CHECK ((external_id <> ''::text)),
     CONSTRAINT directory_user_sources_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES directory_users(id) ON DELETE CASCADE,

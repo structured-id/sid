@@ -2980,6 +2980,27 @@ impl StorageBackend for MockStorage {
         unimplemented!("directory sources are exercised by the storage conformance suite")
     }
 
+    async fn set_directory_rights(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: i64,
+        _: sid_core::models::DirectoryRights,
+        _: MutationContext,
+    ) -> SidResult<bool> {
+        unimplemented!("directory management is exercised by the storage conformance suite")
+    }
+
+    async fn manage_directory_user(
+        &self,
+        _: sid_core::models::ProvisioningConnectorId,
+        _: i64,
+        _: sid_core::models::DirectoryUserId,
+        _: sid_core::models::DirectoryRights,
+        _: MutationContext,
+    ) -> SidResult<sid_core::models::ManagementOutcome> {
+        unimplemented!("directory management is exercised by the storage conformance suite")
+    }
+
     async fn write_directory_group(
         &self,
         _: &sid_core::models::DirectoryGroupWrite,

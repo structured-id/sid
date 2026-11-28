@@ -214,6 +214,8 @@ macro_rules! __storage_conformance {
                 test_directory_source_identifier_races_to_one_user
                 test_directory_source_update_never_creates
                 test_directory_source_retired_with_the_resource
+                test_directory_management_follows_the_revision
+                test_directory_management_change_fences_a_write
             );
             $crate::__storage_scenarios!($setup [$(super::$finish)?],email_policy:
                 test_email_key_written_only_under_the_active_revision

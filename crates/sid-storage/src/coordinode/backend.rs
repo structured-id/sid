@@ -592,6 +592,28 @@ impl StorageBackend for CoordinodeBackend {
         CoordinodeBackend::export_directory_sources(self).await
     }
 
+    async fn set_directory_rights(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> Result<bool> {
+        CoordinodeBackend::set_directory_rights(self, connector, revision, rights, ctx).await
+    }
+
+    async fn manage_directory_user(
+        &self,
+        connector: sid_core::models::ProvisioningConnectorId,
+        revision: i64,
+        resource: sid_core::models::DirectoryUserId,
+        rights: sid_core::models::DirectoryRights,
+        ctx: MutationContext,
+    ) -> Result<sid_core::models::ManagementOutcome> {
+        CoordinodeBackend::manage_directory_user(self, connector, revision, resource, rights, ctx)
+            .await
+    }
+
     async fn write_directory_group(
         &self,
         write: &DirectoryGroupWrite,

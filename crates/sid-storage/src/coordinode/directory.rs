@@ -13,9 +13,10 @@ use sid_core::models::directory_query::metadata_keys;
 use sid_core::models::pat::{PatId, PatStatus, PersonalAccessToken};
 use sid_core::models::{
     DirectoryAttribute as Attr, DirectoryFilter, DirectoryGroupWrite, DirectoryOperator as Op,
-    DirectoryPage, DirectoryQuery, DirectoryResource, DirectorySource, DirectoryUserId,
-    DirectoryUserWrite, DirectoryWriteMode, MutationContext, PrincipalType, Profile, ProfileId,
-    ProfileMetadata, ProfileStatus, ProvisioningConnectorId, Session, SourceWrite,
+    DirectoryPage, DirectoryQuery, DirectoryResource, DirectoryRights, DirectorySource,
+    DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode, MutationContext, PrincipalType,
+    Profile, ProfileId, ProfileMetadata, ProfileStatus, ProvisioningConnectorId, Session,
+    SourceWrite,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 
@@ -279,7 +280,16 @@ fn hold_resource(
 // === Source correlations ===
 
 const SOURCE: &str = "s.resource_id AS resource_id, s.connector_id AS connector_id,
-    s.external_id AS external_id, s.retired AS retired";
+    s.external_id AS external_id, s.retired AS retired, s.created AS created,
+    s.managed AS managed";
+
+/// A stored set of rights; bits that are no right are a broken record.
+pub(super) fn rights(bits: i64) -> SidResult<DirectoryRights> {
+    i32::try_from(bits)
+        .ok()
+        .and_then(DirectoryRights::from_bits)
+        .ok_or_else(|| SidError::Storage(format!("directory rights: unknown bits in {bits}")))
+}
 
 fn source(row: &Row) -> SidResult<DirectorySource> {
     Ok(DirectorySource {
@@ -287,7 +297,61 @@ fn source(row: &Row) -> SidResult<DirectorySource> {
         connector: get_id(row, "connector_id")?,
         external_id: get_opt_text(row, "external_id")?,
         retired: super::get_bool(row, "retired")?,
+        created: super::get_bool(row, "created")?,
+        managed: rights(super::get_int(row, "managed")?)?,
     })
+}
+
+/// Assign the live user `resource` to `connector` with `rights`, or withdraw
+/// it when `rights` is empty. A connector that knows the user keeps its
+/// identifier; one that does not becomes a source of it. False when a
+/// withdrawal found no assignment and nothing was written.
+pub(super) fn manage_user(
+    tx: &Statements<'_>,
+    connector: ProvisioningConnectorId,
+    resource: DirectoryUserId,
+    rights: DirectoryRights,
+) -> SidResult<bool> {
+    // The resource is written, so a concurrent deletion conflicts.
+    let live = tx.run(
+        "MATCH (d:SidDirectoryUser) WHERE d.id = $id AND d.deleted_at IS NULL
+         SET d.turn = coalesce(d.turn, 0) + 1 RETURN d.id AS id",
+        Params::default().with("id", uuid(&resource.0)),
+    )?;
+    if live.is_empty() {
+        return Err(SidError::NotFound(format!("directory user {resource}")));
+    }
+    let pair = source_pair(resource, connector)?;
+    let held = sources_where(tx, "s.pair = $value", pair.clone())?
+        .into_iter()
+        .find(|s| !s.retired);
+    match held {
+        None if rights.is_empty() => Ok(false),
+        Some(held) if rights.is_empty() && held.managed.is_empty() => Ok(false),
+        Some(_) => {
+            tx.run(
+                "MATCH (s:SidDirectorySource) WHERE s.pair = $pair SET s.managed = $managed",
+                Params::default()
+                    .with("pair", pair)
+                    .with("managed", Value::Int(i64::from(rights.bits()))),
+            )?;
+            Ok(true)
+        }
+        None => {
+            create_source(
+                tx,
+                &DirectorySource {
+                    resource,
+                    connector,
+                    external_id: None,
+                    retired: false,
+                    created: false,
+                    managed: rights,
+                },
+            )?;
+            Ok(true)
+        }
+    }
 }
 
 fn sources_where(
@@ -399,13 +463,16 @@ fn create_source(tx: &Statements<'_>, s: &DirectorySource) -> SidResult<()> {
     }
     tx.run(
         "CREATE (s:SidDirectorySource {pair: $pair, resource_id: $resource,
-            connector_id: $connector, external_id: $external_id, retired: $retired})",
+            connector_id: $connector, external_id: $external_id, retired: $retired,
+            created: $created, managed: $managed})",
         Params::default()
             .with("pair", source_pair(s.resource, s.connector)?)
             .with("resource", uuid(&s.resource.0))
             .with("connector", uuid(&s.connector.into_uuid()))
             .with("external_id", opt_text(s.external_id.as_deref()))
-            .with("retired", Value::Bool(s.retired)),
+            .with("retired", Value::Bool(s.retired))
+            .with("created", Value::Bool(s.created))
+            .with("managed", Value::Int(i64::from(s.managed.bits()))),
     )?;
     Ok(())
 }
@@ -424,6 +491,10 @@ fn record_source(tx: &Statements<'_>, profile: ProfileId, write: &SourceWrite) -
             connector: write.connector,
             external_id: write.external_id.clone(),
             retired: false,
+            // The creator is recorded as such and assigned nothing by
+            // creating.
+            created: true,
+            managed: DirectoryRights::NONE,
         },
     )
 }

@@ -1217,7 +1217,9 @@ CREATE INDEX IF NOT EXISTS idx_directory_users_profile ON directory_users(profil
 --------------------------------------------------------------------------------
 -- directory_user_sources: which provisioning source knows which user resource,
 -- and by what identifier of its own (SCIM externalId, scoped to the connector).
--- Provenance only: neither a condition of reading nor authority to change.
+-- Knowing a resource, also having created it (`created`), is neither a
+-- condition of reading nor authority to change it: `managed` holds the rights
+-- the connector was assigned of this one user, as bits, 0 once withdrawn.
 -- `retired` is set with the resource's deletion and frees the identifier.
 --------------------------------------------------------------------------------
 
@@ -1226,6 +1228,8 @@ CREATE TABLE IF NOT EXISTS directory_user_sources (
     connector_id  BLOB NOT NULL CHECK (length(connector_id) = 16) REFERENCES provisioning_connectors(id) ON DELETE CASCADE,
     external_id   TEXT CHECK (external_id <> ''),
     retired       INTEGER NOT NULL DEFAULT 0,
+    created       INTEGER NOT NULL DEFAULT 0,
+    managed       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (resource_id, connector_id)
 ) STRICT;
 
@@ -1930,7 +1934,10 @@ CREATE TABLE IF NOT EXISTS provisioning_connectors (
     state           TEXT NOT NULL CHECK (state IN ('active', 'disabled', 'retired')),
     revision        INTEGER NOT NULL CHECK (revision >= 1),
     created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    -- What the connector may change of every user of the directory, a set
+    -- of rights as bits; 0 when it manages only users assigned one by one.
+    directory_rights INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_provisioning_connectors_org

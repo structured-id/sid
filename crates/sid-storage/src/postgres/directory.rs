@@ -4,10 +4,11 @@
 //! request's changes commit together with its audit entry and owed work.
 
 use sid_core::models::{
-    DirectoryGroupWrite, DirectoryResource, DirectorySource, DirectoryUserId, DirectoryUserWrite,
-    DirectoryWriteMode, Group, GroupId, GroupMember, MutationContext, Principal, PrincipalId,
-    PrincipalType, Profile, ProfileEmail, ProfileEmailId, ProfileId, ProfileMetadata, ProfilePhone,
-    ProfilePhoneId, ProvisioningConnectorId, Session, SessionEnd, SourceWrite,
+    DirectoryGroupWrite, DirectoryResource, DirectoryRights, DirectorySource, DirectoryUserId,
+    DirectoryUserWrite, DirectoryWriteMode, Group, GroupId, GroupMember, ManagementOutcome,
+    MutationContext, Principal, PrincipalId, PrincipalType, Profile, ProfileEmail, ProfileEmailId,
+    ProfileId, ProfileMetadata, ProfilePhone, ProfilePhoneId, ProvisioningConnectorId, Session,
+    SessionEnd, SourceWrite,
 };
 use sid_core::{Error as SidError, Result as SidResult};
 use uuid::Uuid;
@@ -147,7 +148,13 @@ async fn hold_resource(
     Ok(())
 }
 
-pub(super) const SOURCE: &str = "resource_id, connector_id, external_id, retired";
+pub(super) const SOURCE: &str = "resource_id, connector_id, external_id, retired, created, managed";
+
+/// A stored set of rights; bits that are no right are a broken record.
+pub(super) fn rights(bits: i32) -> SidResult<DirectoryRights> {
+    DirectoryRights::from_bits(bits)
+        .ok_or_else(|| SidError::Storage(format!("directory rights: unknown bits in {bits}")))
+}
 
 pub(super) fn source(row: &sqlx::postgres::PgRow) -> SidResult<DirectorySource> {
     use sqlx::Row;
@@ -157,6 +164,8 @@ pub(super) fn source(row: &sqlx::postgres::PgRow) -> SidResult<DirectorySource> 
         connector: row.try_get("connector_id").map_err(read)?,
         external_id: row.try_get("external_id").map_err(read)?,
         retired: row.try_get("retired").map_err(read)?,
+        created: row.try_get("created").map_err(read)?,
+        managed: rights(row.try_get("managed").map_err(read)?)?,
     })
 }
 
@@ -178,8 +187,10 @@ async fn record_source(
     source: &SourceWrite,
 ) -> SidResult<()> {
     sqlx::query(
-        "INSERT INTO directory_user_sources (resource_id, connector_id, external_id)
-         SELECT id, $2, $3 FROM directory_users WHERE profile_id = $1 AND deleted_at IS NULL",
+        // The creator is recorded as such and assigned nothing by creating.
+        "INSERT INTO directory_user_sources (resource_id, connector_id, external_id, created)
+         SELECT id, $2, $3, TRUE FROM directory_users
+         WHERE profile_id = $1 AND deleted_at IS NULL",
     )
     .bind(profile_id)
     .bind(source.connector)
@@ -1036,13 +1047,16 @@ impl PostgresBackend {
             .map_err(storage("replace directory sources"))?;
         for s in sources {
             sqlx::query(
-                "INSERT INTO directory_user_sources (resource_id, connector_id, external_id, retired)
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO directory_user_sources
+                     (resource_id, connector_id, external_id, retired, created, managed)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind(s.resource.0)
             .bind(s.connector)
             .bind(s.external_id.as_deref())
             .bind(s.retired)
+            .bind(s.created)
+            .bind(s.managed.bits())
             .execute(&mut *tx)
             .await
             .map_err(source_error)?;
@@ -1050,6 +1064,106 @@ impl PostgresBackend {
         Self::audit_in_tx(&mut tx, &format!("profile:{profile_id}"), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;
         Ok(())
+    }
+
+    pub(super) async fn set_directory_rights_impl(
+        &self,
+        connector: ProvisioningConnectorId,
+        revision: i64,
+        rights: DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        // The revision moves with the selection: a write the connector was
+        // authorized for before it no longer commits.
+        let moved = sqlx::query(
+            "UPDATE provisioning_connectors
+             SET directory_rights = $3, revision = revision + 1, updated_at = NOW()
+             WHERE id = $1 AND revision = $2",
+        )
+        .bind(connector)
+        .bind(revision)
+        .bind(rights.bits())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage("set directory rights"))?
+        .rows_affected()
+            == 1;
+        if !moved {
+            return Ok(false);
+        }
+        Self::audit_in_tx(&mut tx, &format!("provisioning_connector:{connector}"), ctx).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(true)
+    }
+
+    pub(super) async fn manage_directory_user_impl(
+        &self,
+        connector: ProvisioningConnectorId,
+        revision: i64,
+        resource: DirectoryUserId,
+        rights: DirectoryRights,
+        ctx: MutationContext,
+    ) -> SidResult<ManagementOutcome> {
+        let mut tx = self.pool.begin().await.map_err(storage("begin"))?;
+        // The connector's row is held at the revision the command names: a
+        // command based on an older one changes nothing.
+        let current = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM provisioning_connectors WHERE id = $1 AND revision = $2 FOR UPDATE",
+        )
+        .bind(connector)
+        .bind(revision)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage("hold connector"))?
+        .is_some();
+        if !current {
+            return Ok(ManagementOutcome::Stale);
+        }
+        let live = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM directory_users WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
+        )
+        .bind(resource.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage("directory resource"))?
+        .is_some();
+        if !live {
+            return Err(SidError::NotFound(format!("directory user {resource}")));
+        }
+        if rights.is_empty() {
+            let withdrawn = sqlx::query(
+                "UPDATE directory_user_sources SET managed = 0
+                 WHERE resource_id = $1 AND connector_id = $2 AND NOT retired AND managed <> 0",
+            )
+            .bind(resource.0)
+            .bind(connector)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("withdraw directory user"))?
+            .rows_affected();
+            if withdrawn == 0 {
+                return Ok(ManagementOutcome::NothingToWithdraw);
+            }
+        } else {
+            // A connector that already knows the user keeps its identifier.
+            sqlx::query(
+                "INSERT INTO directory_user_sources (resource_id, connector_id, managed)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (resource_id, connector_id)
+                 DO UPDATE SET managed = excluded.managed",
+            )
+            .bind(resource.0)
+            .bind(connector)
+            .bind(rights.bits())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage("assign directory user"))?;
+        }
+        Self::bump_connector_revision(&mut tx, connector).await?;
+        Self::audit_in_tx(&mut tx, &format!("provisioning_connector:{connector}"), ctx).await?;
+        tx.commit().await.map_err(storage("commit"))?;
+        Ok(ManagementOutcome::Applied)
     }
 
     pub(super) async fn write_directory_group_impl(

@@ -151,7 +151,7 @@ pub use device_authorization::{
 };
 pub use directory::{
     DirectoryGroupWrite, DirectoryResource, DirectoryRight, DirectoryRights, DirectorySource,
-    DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode, SourceWrite,
+    DirectoryUserId, DirectoryUserWrite, DirectoryWriteMode, ManagementOutcome, SourceWrite,
 };
 pub use directory_query::{
     DirectoryAttribute, DirectoryFilter, DirectoryOperator, DirectoryPage, DirectoryQuery,

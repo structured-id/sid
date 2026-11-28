@@ -199,6 +199,19 @@ impl TryFrom<i32> for DirectoryRights {
     }
 }
 
+/// What an assignment or a withdrawal of one user did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagementOutcome {
+    /// The assignment is as the command asked, and the connector's revision
+    /// moved.
+    Applied,
+    /// A withdrawal found no assignment: nothing changed, the revision
+    /// included.
+    NothingToWithdraw,
+    /// The connector moved past the revision the command named.
+    Stale,
+}
+
 /// A provisioning source's correlation with a user resource: which connector
 /// knows the resource and by what identifier of its own (RFC 7643 3.1
 /// `externalId`, scoped to that source), and what the directory's manager
