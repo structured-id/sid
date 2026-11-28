@@ -64,11 +64,42 @@ impl DirectoryResource {
         self.deleted_at.is_none()
     }
 
-    /// SCIM `active` of the user this resource serves for `account`: the
-    /// relationship is active and the account can be used. One definition
-    /// for a single read, a page and a filter.
+    /// SCIM `active` of the user this resource serves for `account`. A
+    /// relationship shows its own state, whatever the identity's account
+    /// is; a managed account shows whether it can be used. One definition
+    /// for a single read, a page and a filter. It tells what the directory
+    /// holds, not whether a sign-in would succeed.
     pub fn shows_active(&self, account: &Profile) -> bool {
-        self.active && account.status.is_in_use()
+        match DirectoryTarget::of(account) {
+            DirectoryTarget::Relationship => self.active,
+            DirectoryTarget::Account => account.status.is_in_use(),
+        }
+    }
+}
+
+/// What a directory user stands for, which decides what its `active` tells
+/// and what deactivating or deleting it ends. Derived from the account as
+/// stored now, never from a request or from the rights a caller holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryTarget {
+    /// A local account the directory's organization manages whole: its own
+    /// lifecycle is the user's state.
+    Account,
+    /// A relationship with an identity that signs in elsewhere and may hold
+    /// access here on other grounds: the directory owns the relationship,
+    /// not the identity's account.
+    Relationship,
+}
+
+impl DirectoryTarget {
+    pub fn of(account: &Profile) -> Self {
+        // A record without local credentials is this installation's
+        // reference to an identity another installation signs in.
+        if account.profile_type.is_local() {
+            Self::Account
+        } else {
+            Self::Relationship
+        }
     }
 }
 

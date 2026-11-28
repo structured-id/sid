@@ -490,10 +490,11 @@ pub async fn test_directory_active_follows_use(backend: &dyn StorageBackend) {
     assert_eq!(inactive, vec!["closing", "held", "suspended"]);
 }
 
-/// The directory relationship has a state of its own beside the account's:
-/// a user is active while both are, in the page and for the filter alike.
-/// Setting the state is a change of the resource (its revision moves), a
-/// repeat is none, and the account is left as it was either way.
+/// The resource carries a state of its own beside the account's. Setting it
+/// is a change of the resource (its revision moves), a repeat is none, and
+/// the account is left as it was either way. A user that is a managed local
+/// account shows the account's lifecycle, in the page and for the filter
+/// alike, whatever that state is.
 pub async fn test_directory_relationship_activity(backend: &dyn StorageBackend) {
     let domain = domain();
     let user = add_user(backend, &domain, "related", &[], &[]).await;
@@ -545,7 +546,7 @@ pub async fn test_directory_relationship_activity(backend: &dyn StorageBackend) 
     let ended = set(Some(false), user.status).await;
     assert!(!ended.active);
     assert_eq!(ended.revision, resource.revision + 1);
-    assert!(!shown().await);
+    assert!(shown().await, "a managed account shows its own lifecycle");
     let account = backend.get_profile(user.id).await.unwrap().unwrap();
     assert_eq!(account.status, user.status, "the account is not touched");
     assert_eq!(
@@ -559,9 +560,82 @@ pub async fn test_directory_relationship_activity(backend: &dyn StorageBackend) 
     assert_eq!(restored.revision, ended.revision + 1);
     assert!(shown().await);
 
-    // An active relationship with an account that cannot be used is not
-    // an active user.
+    // A managed account that cannot be used is not an active user.
     assert!(set(None, ProfileStatus::Suspended).await.active);
+    assert!(!shown().await);
+}
+
+/// What `active` tells depends on what the user stands for. A user that is
+/// a relationship with an identity signing in elsewhere shows the state of
+/// the relationship alone: a block on the identity's own account does not
+/// make an active relationship inactive, nor the reverse. A read, a page
+/// and a filter agree.
+pub async fn test_directory_relationship_activity_is_its_own(backend: &dyn StorageBackend) {
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = sid_core::models::ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    backend
+        .create_profile(&identity, test_audit())
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &identity).await;
+    // Found among a shared database's users by a value of this run only.
+    let mark = uuid::Uuid::now_v7().simple().to_string();
+    let write = async |status: ProfileStatus, active: Option<bool>| {
+        let mut account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        account.status = status;
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = active;
+        write.set_metadata.push(ProfileMetadata::new(
+            identity.id,
+            "title",
+            serde_json::Value::String(mark.clone()),
+        ));
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let shown = async || {
+        let found = async |value: &str| {
+            backend
+                .query_directory(&DirectoryQuery {
+                    org_domain: domain(),
+                    filter: Some(F::And(
+                        Box::new(compare(Attr::Title, Op::Eq, &mark)),
+                        Box::new(compare(Attr::Active, Op::Eq, value)),
+                    )),
+                    offset: 0,
+                    limit: 10,
+                    source: None,
+                })
+                .await
+                .unwrap()
+                .users
+        };
+        let (active, inactive) = (found("true").await, found("false").await);
+        assert_eq!(active.len() + inactive.len(), 1, "one of the two finds it");
+        let page = active.first().or(inactive.first()).unwrap().active;
+        assert_eq!(page, !active.is_empty(), "the page and the filter agree");
+        let account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        let read = backend
+            .find_directory_user(resource.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .shows_active(&account);
+        assert_eq!(read, page, "a read and the page agree");
+        page
+    };
+
+    write(ProfileStatus::Active, None).await;
+    assert!(shown().await);
+    // The identity's own account is blocked: the relationship stays active.
+    write(ProfileStatus::Suspended, None).await;
+    assert!(shown().await, "an account block ended the relationship");
+    // The relationship is ended while the account is in use.
+    write(ProfileStatus::Active, Some(false)).await;
     assert!(!shown().await);
 }
 

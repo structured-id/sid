@@ -317,31 +317,7 @@ impl ScimServiceImpl {
     }
 }
 
-/// What a user resource stands for, which decides what deactivating or
-/// deleting it ends. Derived from the account as stored now, never from the
-/// request or from the rights the caller holds.
-enum Target {
-    /// A local account the directory's organization manages whole (admin
-    /// delegation): its own state is the user's state, and deactivating or
-    /// deleting the user is the account's local offboarding.
-    Account,
-    /// A relationship with an identity that signs in elsewhere and may hold
-    /// access here on other grounds: the directory ends the relationship
-    /// and what rests on it, not the identity's account.
-    Relationship,
-}
-
-impl Target {
-    fn of(account: &Profile) -> Self {
-        // A record without local credentials is this installation's
-        // reference to an identity another installation signs in.
-        if account.profile_type.is_local() {
-            Self::Account
-        } else {
-            Self::Relationship
-        }
-    }
-}
+use sid_core::models::DirectoryTarget as Target;
 
 /// The right that covers the account attribute stored under metadata `key`.
 #[allow(clippy::result_large_err)]

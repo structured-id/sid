@@ -223,12 +223,15 @@ impl Writer {
                         ));
                     }
                 };
-                // `DirectoryResource::shows_active`: the relationship is
-                // active and the account is in use or waiting for its user
-                // (`ProfileStatus::is_in_use`); anything else is not active.
-                const ACTIVE: &str = "(p.status IN ('active', 'provisioned') AND p.id IN \
+                // `DirectoryResource::shows_active`: a relationship
+                // (`DirectoryTarget::of`: a record that is not a local
+                // account) shows its own state; a managed account is active
+                // while in use or waiting for its user
+                // (`ProfileStatus::is_in_use`).
+                const ACTIVE: &str = "(CASE WHEN p.profile_type = 'federated' THEN p.id IN \
                      (SELECT d.profile_id FROM directory_users d \
-                      WHERE d.deleted_at IS NULL AND d.active))";
+                      WHERE d.deleted_at IS NULL AND d.active) \
+                     ELSE p.status IN ('active', 'provisioned') END)";
                 if !wanted {
                     self.sql.push_str("NOT ");
                 }
