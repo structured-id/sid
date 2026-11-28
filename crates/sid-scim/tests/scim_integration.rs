@@ -2528,6 +2528,78 @@ async fn test_user_name_is_renamed_by_delegation() {
     assert_eq!(patched.id, created.id);
 }
 
+/// A replacement that sends back the `active: false` it read, with another
+/// field changed, deactivates nothing when the account has no live access
+/// left: it takes only the right for that field. The same request while a
+/// sign-in of the account is live would end it, so it needs the authority
+/// for that and writes nothing without it. An account under a hold shows
+/// inactive whatever its sessions, so both requests are the same bytes.
+#[tokio::test]
+async fn test_restated_inactive_ends_only_live_access() {
+    let (service, storage, _, directory) = setup_directory().await;
+    let (id, profile_id, session, pat) = signed_in_employee(&service, &storage).await;
+    let held = service
+        .get_user(provisioned(proto::ScimGetUserRequest { id: id.clone() }))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut account = storage.get_profile(profile_id).await.unwrap().unwrap();
+    account.status = ProfileStatus::LegalHold;
+    assert!(
+        storage
+            .update_profile(&account, AuditEntry::system("test.state", "hold").into())
+            .await
+            .unwrap()
+    );
+    let (_, titles) = connector_managing(
+        &storage,
+        directory,
+        &SCIM_ACTIONS,
+        DirectoryRights::of(&[DirectoryRight::Title]),
+    )
+    .await;
+    let replace = |title: &str| proto::ScimReplaceUserRequest {
+        id: id.clone(),
+        user_name: held.user_name.clone(),
+        name: held.name.clone(),
+        emails: held.emails.clone(),
+        phone_numbers: held.phone_numbers.clone(),
+        active: false,
+        department: held.department.clone(),
+        title: title.into(),
+        ..Default::default()
+    };
+
+    // A sign-in is live: the request would end it.
+    let refused = service
+        .replace_user(with_token(replace("Refused"), &titles))
+        .await
+        .expect_err("ending live access is not this connector's");
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    assert!(storage.get_session(session.id).await.unwrap().is_some());
+
+    // Nothing live is left: the same request only edits the title.
+    storage
+        .delete_sessions_by_profile(
+            profile_id,
+            &sid_core::models::SessionEnd::new(sid_core::models::RevocationReason::Admin, "test"),
+            AuditEntry::system("test.end", "sessions").into(),
+        )
+        .await
+        .unwrap();
+    storage
+        .revoke_pat(pat.id, "test", AuditEntry::system("test.end", "pat").into())
+        .await
+        .unwrap();
+    let replaced = service
+        .replace_user(with_token(replace("Edited"), &titles))
+        .await
+        .expect("a restated inactive state deactivates nothing")
+        .into_inner();
+    assert_eq!(replaced.title, "Edited");
+    assert!(!replaced.active);
+}
+
 /// A connector manages what its manager selected and nothing else: a change
 /// outside it is refused, a request mixing both is refused whole and writes
 /// nothing, and a value restated takes no right. Deleting a managed account

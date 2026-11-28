@@ -186,6 +186,28 @@ impl ScimServiceImpl {
         Ok(())
     }
 
+    /// Whether the account `profile` has what a deactivation ends: a
+    /// sign-in or a usable token. Read before the write: one issued after
+    /// it is not this request's to end.
+    #[allow(clippy::result_large_err)]
+    async fn has_live_access(&self, profile: ProfileId) -> Result<bool, Status> {
+        if !self
+            .storage
+            .list_sessions(&profile)
+            .await
+            .map_err(storage_failure)?
+            .is_empty()
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .storage
+            .count_active_pats_by_profile(profile)
+            .await
+            .map_err(storage_failure)?
+            > 0)
+    }
+
     /// The user `resource` as `caller` is shown it, read from the store.
     #[allow(clippy::result_large_err)]
     async fn shown(
@@ -414,15 +436,22 @@ impl Activity {
 
 /// Decide what the `wanted` SCIM `active` changes of the user `found`
 /// stands for, moving the status of `account` when the account itself is
-/// the target. `claimed`: the user has taken the account over.
+/// the target. `claimed`: the user has taken the account over. `live`:
+/// the account has a sign-in or a token a deactivation would end.
 fn set_active(
     wanted: bool,
     found: &DirectoryResource,
     before: &Profile,
     claimed: bool,
+    live: bool,
     account: &mut Profile,
 ) -> Activity {
     match (Target::of(before), wanted) {
+        // An account that already shows inactive and has nothing live left:
+        // the request restates what it read and ends nothing. The same
+        // request while access is live does end it, below, and takes the
+        // authority for that.
+        (Target::Account, false) if !before.status.is_in_use() && !live => Activity::Unchanged,
         (Target::Relationship, _) if wanted != found.active => Activity::Relationship(wanted),
         // Restated; when the identity's own account is what holds the user
         // inactive, that is no directory client's to lift.
@@ -806,7 +835,11 @@ impl ScimService for ScimServiceImpl {
         // `active` is a change only when it differs from what the user
         // shows. What the change does follows what the resource stands for.
         let claimed = old_identifiers.iter().any(|i| i.verified);
-        let activity = set_active(req.active, &found, &before, claimed, &mut profile);
+        // Read only where it decides: an account that already shows
+        // inactive and is asked to stay so.
+        let live =
+            req.active || before.status.is_in_use() || self.has_live_access(profile_id).await?;
+        let activity = set_active(req.active, &found, &before, claimed, live, &mut profile);
         let deactivating = activity.apply(&mut write, &mut effects);
         write.profile = profile.clone();
 
@@ -970,7 +1003,9 @@ impl ScimService for ScimServiceImpl {
         let mut deactivating = false;
         if let Some(wanted) = patch_result.active {
             let claimed = identifiers.iter().any(|i| i.verified);
-            deactivating = set_active(wanted, &found, &before, claimed, &mut profile)
+            let live =
+                wanted || before.status.is_in_use() || self.has_live_access(profile_id).await?;
+            deactivating = set_active(wanted, &found, &before, claimed, live, &mut profile)
                 .apply(&mut write, &mut effects);
             write.profile = profile.clone();
         }
