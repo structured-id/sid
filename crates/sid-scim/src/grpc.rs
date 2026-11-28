@@ -1285,7 +1285,9 @@ impl ScimService for ScimServiceImpl {
         let group = scim_create_group_to_sid(&req, self.org_ctx.project_id);
         let group_id_str = group.id.to_string();
 
-        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone());
+        // The members are this connector's own assignments.
+        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone())
+            .by_source(caller.connector.id);
         for member_ref in &req.members {
             let pid = self.member(&member_ref.value, false).await?;
             write.add_members.push(GroupMember::new(group.id, pid));
@@ -1406,9 +1408,12 @@ impl ScimService for ScimServiceImpl {
         if let Some(new_name) = &patch_result.display_name {
             group.name = new_name.clone();
         }
-        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone());
         // Members are named by their user resources; the write and the
-        // event carry the accounts they stand for.
+        // event carry the accounts they stand for. The connector adds and
+        // withdraws its own assignments: another source's, or a local one,
+        // keeps the member in the group.
+        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone())
+            .by_source(caller.connector.id);
         for member_id in &patch_result.add_members {
             let pid = self.member(member_id, false).await?;
             write.add_members.push(GroupMember::new(group.id, pid));

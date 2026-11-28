@@ -1502,7 +1502,17 @@ async fn test_group_removal_of_a_deleted_user() {
         }))
         .await
         .unwrap();
-    assert_eq!(storage.list_group_members(group_id).await.unwrap().len(), 1);
+    // The connector's assignment rested on the resource it deleted: it gives
+    // no membership any more. The client's own removal that follows is of an
+    // assignment still on record and must still succeed.
+    assert!(
+        storage
+            .list_group_members(group_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a deleted user's assignment kept its membership"
+    );
 
     let remove = |id: String| proto::ScimPatchOp {
         op: "remove".into(),
