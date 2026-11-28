@@ -5178,7 +5178,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        directory::add_member(&mut tx, member).await?;
+        directory::add_member(&mut tx, member, None).await?;
         Self::audit_in_tx(
             &mut tx,
             &format!("group:{}:member:{}", member.group_id, member.profile_id),
@@ -5202,7 +5202,7 @@ impl StorageBackend for PostgresBackend {
             .begin()
             .await
             .map_err(|e| SidError::Storage(e.to_string()))?;
-        directory::remove_member(&mut tx, group_id, profile_id).await?;
+        directory::remove_member(&mut tx, group_id, profile_id, None).await?;
         Self::audit_in_tx(
             &mut tx,
             &format!("group:{group_id}:member:{profile_id}"),

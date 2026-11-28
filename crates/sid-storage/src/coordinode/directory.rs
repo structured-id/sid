@@ -283,6 +283,10 @@ fn hold_resource(
             Params::default().with("id", uuid(&id.0)),
         )?;
     }
+    if changed {
+        // The memberships resting on this resource stand or fall with it.
+        super::rbac::settle_resource_members(tx, id)?;
+    }
     Ok(())
 }
 
@@ -903,7 +907,7 @@ fn write_group(tx: &Statements<'_>, write: &DirectoryGroupWrite) -> SidResult<()
         }
     }
     for profile in &write.remove_members {
-        super::rbac::remove_member(tx, group_id, *profile)?;
+        super::rbac::remove_member(tx, group_id, *profile, write.source)?;
     }
     for member in &write.add_members {
         if member.group_id != group_id {
@@ -911,7 +915,7 @@ fn write_group(tx: &Statements<'_>, write: &DirectoryGroupWrite) -> SidResult<()
                 "a group write adds members to its own group only".into(),
             ));
         }
-        super::rbac::add_member(tx, member)?;
+        super::rbac::add_member(tx, member, write.source)?;
     }
     Ok(())
 }

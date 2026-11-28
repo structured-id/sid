@@ -403,6 +403,12 @@ pub struct DirectoryGroupWrite {
     pub group: Group,
     pub add_members: Vec<GroupMember>,
     pub remove_members: Vec<ProfileId>,
+    /// Whose assignments the members above are: an inbound connector's own
+    /// (each resting on the member's directory resource), or, absent, ones
+    /// made locally. A member belongs to the group while any assignment of
+    /// it stands; a connector's stands while its resource is live and
+    /// active. Removing touches this origin's assignment only.
+    pub source: Option<super::ProvisioningConnectorId>,
 }
 
 impl DirectoryGroupWrite {
@@ -413,6 +419,13 @@ impl DirectoryGroupWrite {
             group,
             add_members: Vec::new(),
             remove_members: Vec::new(),
+            source: None,
         }
+    }
+
+    /// The same write, its members being the assignments of `connector`.
+    pub fn by_source(mut self, connector: super::ProvisioningConnectorId) -> Self {
+        self.source = Some(connector);
+        self
     }
 }

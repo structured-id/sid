@@ -953,7 +953,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        super::directory::add_member(&mut tx, member).await?;
+        super::directory::add_member(&mut tx, member, None).await?;
         Self::commit_mutation(tx, &format!("group:{}", member.group_id), audit).await
     }
 
@@ -964,7 +964,7 @@ impl SqliteBackend {
         audit: MutationContext,
     ) -> SidResult<()> {
         let mut tx = self.begin_write().await?;
-        super::directory::remove_member(&mut tx, group_id, profile_id).await?;
+        super::directory::remove_member(&mut tx, group_id, profile_id, None).await?;
         Self::commit_mutation(tx, &format!("group:{group_id}"), audit).await
     }
 

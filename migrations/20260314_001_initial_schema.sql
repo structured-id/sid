@@ -1391,6 +1391,27 @@ CREATE TABLE group_members (
     CONSTRAINT group_members_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 );
 
+-- Why a member belongs to a group: one row per assignment. group_members
+-- holds the members that have at least one assignment standing and is what
+-- access decisions read; it is settled in the transaction that changes an
+-- assignment or the relationship one rests on.
+CREATE TABLE group_member_origins (
+    group_id uuid NOT NULL,
+    profile_id uuid NOT NULL,
+    -- The inbound provisioning connector that made the assignment; the nil
+    -- UUID for one made locally.
+    connector_id uuid NOT NULL,
+    -- The directory user resource a connector's assignment rests on: it
+    -- stands while that resource is live and active. NULL for a local one.
+    resource_id uuid,
+    added_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT group_member_origins_pkey PRIMARY KEY (group_id, profile_id, connector_id),
+    CONSTRAINT group_member_origins_group_id_fkey FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    CONSTRAINT group_member_origins_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_group_member_origins_resource ON group_member_origins USING btree (resource_id) WHERE resource_id IS NOT NULL;
+
 CREATE TABLE impersonation_grants (
     id uuid NOT NULL,
     machine_user_id uuid NOT NULL,

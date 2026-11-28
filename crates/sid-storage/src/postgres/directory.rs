@@ -159,6 +159,10 @@ async fn hold_resource(
         .await
         .map_err(storage("directory resource activity"))?;
     }
+    if delete || active.is_some() {
+        // The memberships resting on this resource stand or fall with it.
+        settle_resource_members(tx, id).await?;
+    }
     Ok(())
 }
 
@@ -758,22 +762,98 @@ async fn update_group(tx: &mut Tx<'_>, g: &Group) -> SidResult<bool> {
         .map_err(|e| insert_error("group", e))
 }
 
-/// Add a member (a repeat is no change). A grant the new member made to the
+/// The stored origin of an assignment made by `source`: the nil UUID stands
+/// for one made locally.
+fn origin(source: Option<sid_core::models::ProvisioningConnectorId>) -> Uuid {
+    source.map_or(Uuid::nil(), |connector| connector.into_uuid())
+}
+
+/// Make `group_members` agree with the assignments of `profile_id` to
+/// `group_id`: a member while any assignment stands. A local one always
+/// does; a connector's does while the resource it rests on is live and
+/// active.
+async fn settle_member(
+    tx: &mut Tx<'_>,
+    group_id: GroupId,
+    profile_id: ProfileId,
+    added_at: jiff::Timestamp,
+) -> SidResult<()> {
+    macro_rules! standing {
+        () => {
+            "(SELECT 1 FROM group_member_origins o
+              LEFT JOIN directory_users d ON d.id = o.resource_id
+              WHERE o.group_id = $1 AND o.profile_id = $2
+                AND (o.resource_id IS NULL OR (d.deleted_at IS NULL AND d.active)))"
+        };
+    }
+    sqlx::query(concat!(
+        "INSERT INTO group_members (group_id, profile_id, added_at)
+         SELECT $1, $2, $3 WHERE EXISTS ",
+        standing!(),
+        " ON CONFLICT (group_id, profile_id) DO NOTHING"
+    ))
+    .bind(group_id)
+    .bind(profile_id)
+    .bind(added_at.pg())
+    .execute(&mut **tx)
+    .await
+    .map_err(member_error)?;
+    sqlx::query(concat!(
+        "DELETE FROM group_members WHERE group_id = $1 AND profile_id = $2
+         AND NOT EXISTS ",
+        standing!()
+    ))
+    .bind(group_id)
+    .bind(profile_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage("settle group member"))?;
+    Ok(())
+}
+
+/// Settle every membership that rests on the directory resource `resource`,
+/// after its activity or its deletion changed.
+async fn settle_resource_members(tx: &mut Tx<'_>, resource: DirectoryUserId) -> SidResult<()> {
+    let resting: Vec<(GroupId, ProfileId)> = sqlx::query_as(
+        "SELECT group_id, profile_id FROM group_member_origins WHERE resource_id = $1",
+    )
+    .bind(resource.0)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(storage("memberships of a directory resource"))?;
+    for (group_id, profile_id) in resting {
+        settle_member(tx, group_id, profile_id, jiff::Timestamp::now()).await?;
+    }
+    Ok(())
+}
+
+/// Record the assignment `member` made by `source` (a repeat is no change)
+/// and settle the membership. A connector's assignment rests on the
+/// member's live directory resource. A grant the new member made to the
 /// group stays withheld from it (`RoleAssignment::withheld_from`), so joining
 /// needs no check against the group's grants.
-pub(super) async fn add_member(tx: &mut Tx<'_>, member: &GroupMember) -> SidResult<()> {
+pub(super) async fn add_member(
+    tx: &mut Tx<'_>,
+    member: &GroupMember,
+    source: Option<sid_core::models::ProvisioningConnectorId>,
+) -> SidResult<()> {
     sqlx::query(
-        "INSERT INTO group_members (group_id, profile_id, added_at)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (group_id, profile_id) DO NOTHING",
+        "INSERT INTO group_member_origins (group_id, profile_id, connector_id, resource_id, added_at)
+         VALUES ($1, $2, $3,
+            CASE WHEN $4 THEN (SELECT d.id FROM directory_users d
+                               WHERE d.profile_id = $2 AND d.deleted_at IS NULL) END,
+            $5)
+         ON CONFLICT (group_id, profile_id, connector_id) DO NOTHING",
     )
     .bind(member.group_id)
     .bind(member.profile_id)
+    .bind(origin(source))
+    .bind(source.is_some())
     .bind(member.added_at.pg())
     .execute(&mut **tx)
     .await
     .map_err(member_error)?;
-    Ok(())
+    settle_member(tx, member.group_id, member.profile_id, member.added_at).await
 }
 
 /// A member that is no account is the caller's mistake, not a fault.
@@ -786,19 +866,25 @@ fn member_error(e: sqlx::Error) -> SidError {
     }
 }
 
-/// Remove a member.
+/// Withdraw the assignment of `profile_id` to `group_id` made by `source`
+/// and settle the membership: another origin's assignment keeps it.
 pub(super) async fn remove_member(
     tx: &mut Tx<'_>,
     group_id: GroupId,
     profile_id: ProfileId,
+    source: Option<sid_core::models::ProvisioningConnectorId>,
 ) -> SidResult<()> {
-    sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND profile_id = $2")
-        .bind(group_id)
-        .bind(profile_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(storage("remove group member"))?;
-    Ok(())
+    sqlx::query(
+        "DELETE FROM group_member_origins
+         WHERE group_id = $1 AND profile_id = $2 AND connector_id = $3",
+    )
+    .bind(group_id)
+    .bind(profile_id)
+    .bind(origin(source))
+    .execute(&mut **tx)
+    .await
+    .map_err(storage("remove group member"))?;
+    settle_member(tx, group_id, profile_id, jiff::Timestamp::now()).await
 }
 
 impl PostgresBackend {
@@ -1204,7 +1290,7 @@ impl PostgresBackend {
             }
         }
         for profile_id in &write.remove_members {
-            remove_member(&mut tx, group_id, *profile_id).await?;
+            remove_member(&mut tx, group_id, *profile_id, write.source).await?;
         }
         for member in &write.add_members {
             if member.group_id != group_id {
@@ -1212,7 +1298,7 @@ impl PostgresBackend {
                     "a group write adds members to its own group only".into(),
                 ));
             }
-            add_member(&mut tx, member).await?;
+            add_member(&mut tx, member, write.source).await?;
         }
         Self::audit_in_tx(&mut tx, &format!("group:{group_id}"), ctx).await?;
         tx.commit().await.map_err(storage("commit"))?;

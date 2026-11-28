@@ -639,6 +639,130 @@ pub async fn test_directory_relationship_activity_is_its_own(backend: &dyn Stora
     assert!(!shown().await);
 }
 
+/// A member belongs to a group while any assignment of it stands. Each
+/// inbound source owns its assignments and a local one is independent of
+/// them: removing one leaves the others. A source's assignment rests on the
+/// member's directory resource: while that relationship is inactive or
+/// deleted it gives no membership, an independent assignment still does,
+/// and reactivating the relationship makes only the assignments that still
+/// exist count again.
+pub async fn test_directory_membership_follows_its_grounds(backend: &dyn StorageBackend) {
+    use sid_core::models::{DirectoryGroupWrite, Group, GroupMember, ProjectId};
+    backend.ensure_system_project(test_audit()).await.unwrap();
+    let mut identity = Profile::new(None::<String>);
+    identity.profile_type = sid_core::models::ProfileType::Federated;
+    identity.status = ProfileStatus::Active;
+    backend
+        .create_profile(&identity, test_audit())
+        .await
+        .unwrap();
+    let resource = resource_of(backend, &identity).await;
+    let (first, second) = (add_source(backend).await, add_source(backend).await);
+    let group = Group::new(
+        ProjectId::SYSTEM,
+        format!("grounds_{}", uuid::Uuid::now_v7().simple()),
+    );
+    backend
+        .write_directory_group(
+            &DirectoryGroupWrite::new(DirectoryWriteMode::Create, group.clone()),
+            test_audit(),
+        )
+        .await
+        .unwrap();
+
+    let assign = async |source: Option<ProvisioningConnectorId>, member: bool| {
+        let mut write = DirectoryGroupWrite::new(DirectoryWriteMode::Update, group.clone());
+        write.source = source;
+        if member {
+            write
+                .add_members
+                .push(GroupMember::new(group.id, identity.id));
+        } else {
+            write.remove_members.push(identity.id);
+        }
+        backend
+            .write_directory_group(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let relationship = async |active: Option<bool>, delete: bool| {
+        let account = backend.get_profile(identity.id).await.unwrap().unwrap();
+        let mut write =
+            DirectoryUserWrite::new(DirectoryWriteMode::Update, account).through(resource.id);
+        write.resource_active = active;
+        write.delete_resource = delete;
+        backend
+            .write_directory_user(&write, test_audit())
+            .await
+            .unwrap();
+    };
+    let belongs = async || {
+        let listed = backend
+            .list_group_members(group.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.profile_id == identity.id);
+        let of_member = backend
+            .list_groups_for_profile(identity.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|g| g.id == group.id);
+        assert_eq!(listed, of_member, "the two reads of membership agree");
+        listed
+    };
+
+    // Two sources and a local assignment: each removal leaves the others.
+    assign(Some(first), true).await;
+    assign(Some(first), true).await;
+    assign(Some(second), true).await;
+    assign(None, true).await;
+    assert!(belongs().await);
+    assign(Some(first), false).await;
+    assert!(belongs().await, "one source withdrew another's assignment");
+    assign(Some(second), false).await;
+    assert!(belongs().await, "the sources withdrew a local assignment");
+    assign(None, false).await;
+    assert!(!belongs().await, "membership outlived its last assignment");
+
+    // A source's assignment gives nothing while its relationship is
+    // inactive, and counts again when it is reactivated.
+    assign(Some(first), true).await;
+    assert!(belongs().await);
+    relationship(Some(false), false).await;
+    assert!(!belongs().await, "an inactive relationship kept its grant");
+    relationship(Some(true), false).await;
+    assert!(
+        belongs().await,
+        "reactivation did not restore a current grant"
+    );
+
+    // An assignment withdrawn while inactive is not restored.
+    assign(Some(second), true).await;
+    relationship(Some(false), false).await;
+    assign(Some(first), false).await;
+    assign(Some(second), false).await;
+    relationship(Some(true), false).await;
+    assert!(!belongs().await, "reactivation restored a withdrawn grant");
+
+    // An independent assignment stands whatever the relationship is, and
+    // a deleted relationship gives nothing.
+    assign(Some(first), true).await;
+    assign(None, true).await;
+    relationship(Some(false), false).await;
+    assert!(
+        belongs().await,
+        "a local assignment fell with the relationship"
+    );
+    assign(None, false).await;
+    assert!(!belongs().await);
+    relationship(Some(true), false).await;
+    assert!(belongs().await);
+    relationship(None, true).await;
+    assert!(!belongs().await, "a deleted relationship kept its grant");
+}
+
 /// The live resource of `profile`.
 async fn resource_of(
     backend: &dyn StorageBackend,
