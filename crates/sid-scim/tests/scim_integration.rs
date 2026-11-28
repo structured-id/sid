@@ -1590,6 +1590,38 @@ async fn test_group_members_are_each_sources_own() {
         .await
         .unwrap();
     assert_eq!(effective().await, 1);
+
+    // A source replacing `members` sets its own list and nobody else's.
+    let whole = |op: &str, value: String| proto::ScimPatchGroupRequest {
+        id: group.id.clone(),
+        operations: vec![proto::ScimPatchOp {
+            op: op.into(),
+            path: "members".into(),
+            value,
+        }],
+    };
+    service
+        .patch_group(provisioned(patch("add", &second.id)))
+        .await
+        .unwrap();
+    service
+        .patch_group(with_token(
+            whole("replace", format!(r#"[{{"value":"{}"}}]"#, first.id)),
+            &other,
+        ))
+        .await
+        .expect("a source replaces its own list");
+    assert_eq!(shown(Some(&other)).await, sorted(&[&first.id]));
+    assert_eq!(shown(None).await, sorted(&[&second.id]));
+    assert_eq!(effective().await, 2);
+    // Removing `members` with no value clears that source's list only.
+    service
+        .patch_group(with_token(whole("remove", String::new()), &other))
+        .await
+        .expect("a source clears its own list");
+    assert!(shown(Some(&other)).await.is_empty());
+    assert_eq!(shown(None).await, sorted(&[&second.id]));
+    assert_eq!(effective().await, 1);
 }
 
 /// Regression: a client that deletes a user and then removes it from its

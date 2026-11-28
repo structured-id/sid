@@ -274,9 +274,14 @@ fn extract_filter_value(path: &str) -> Option<String> {
 pub struct GroupPatchResult {
     /// Display name changed.
     pub display_name: Option<String>,
-    /// Members to add (profile IDs).
+    /// Whether the request set the caller's whole member list (a
+    /// replacement of `members`, or their removal with no value): the
+    /// caller's assignments not in [`Self::add_members`] are withdrawn.
+    pub replaces_members: bool,
+    /// The members the request leaves assigned, by the identifiers it
+    /// named them with, in request order.
     pub add_members: Vec<String>,
-    /// Members to remove (profile IDs).
+    /// The members the request leaves withdrawn, likewise.
     pub remove_members: Vec<String>,
 }
 
@@ -284,10 +289,13 @@ pub struct GroupPatchResult {
 pub fn apply_group_patch(ops: &[proto::ScimPatchOp]) -> Result<GroupPatchResult, PatchError> {
     let mut result = GroupPatchResult {
         display_name: None,
+        replaces_members: false,
         add_members: vec![],
         remove_members: vec![],
     };
 
+    // Operations apply in request order, each on the result of the one
+    // before (RFC 7644 §3.5.2): what is kept is where each member ends.
     for op in ops {
         let op_type = op.op.to_lowercase();
         match (op_type.as_str(), op.path.as_str()) {
@@ -295,23 +303,32 @@ pub fn apply_group_patch(ops: &[proto::ScimPatchOp]) -> Result<GroupPatchResult,
                 result.display_name = Some(op.value.clone());
             }
             ("add", "members") => {
-                // Value is JSON array or single member ref
-                if let Ok(members) = serde_json::from_str::<Vec<serde_json::Value>>(&op.value) {
-                    for m in members {
-                        if let Some(val) = m.get("value").and_then(|v| v.as_str()) {
-                            result.add_members.push(val.to_string());
-                        }
-                    }
-                } else if let Ok(m) = serde_json::from_str::<serde_json::Value>(&op.value)
-                    && let Some(val) = m.get("value").and_then(|v| v.as_str())
-                {
-                    result.add_members.push(val.to_string());
+                for id in member_values(&op.value)? {
+                    result.assign(id);
+                }
+            }
+            ("replace", "members") => {
+                let members = member_values(&op.value)?;
+                result.clear_members();
+                for id in members {
+                    result.assign(id);
+                }
+            }
+            // No value: the caller's whole list. A value that is present
+            // and malformed is refused by `member_values`, never read as
+            // this.
+            ("remove", "members") if op.value.is_empty() => result.clear_members(),
+            // A value array names the members to remove, an empty one
+            // nobody.
+            ("remove", "members") => {
+                for id in member_values(&op.value)? {
+                    result.withdraw(id);
                 }
             }
             ("remove", path) if path.starts_with("members[") => {
-                if let Some(value) = extract_filter_value(path) {
-                    result.remove_members.push(value);
-                }
+                let id = extract_filter_value(path)
+                    .ok_or_else(|| PatchError::InvalidPath(op.path.clone()))?;
+                result.withdraw(id);
             }
             _ => {
                 return Err(PatchError::InvalidPath(op.path.clone()));
@@ -320,6 +337,56 @@ pub fn apply_group_patch(ops: &[proto::ScimPatchOp]) -> Result<GroupPatchResult,
     }
 
     Ok(result)
+}
+
+impl GroupPatchResult {
+    fn assign(&mut self, id: String) {
+        self.remove_members.retain(|held| *held != id);
+        if !self.add_members.contains(&id) {
+            self.add_members.push(id);
+        }
+    }
+
+    fn withdraw(&mut self, id: String) {
+        self.add_members.retain(|held| *held != id);
+        if !self.remove_members.contains(&id) {
+            self.remove_members.push(id);
+        }
+    }
+
+    fn clear_members(&mut self) {
+        self.replaces_members = true;
+        self.add_members.clear();
+        self.remove_members.clear();
+    }
+}
+
+/// The member identifiers a `members` value names: an array of member
+/// objects, or one object, each with a string `value` (other keys, a `$ref`
+/// of null among them, are not read). Anything else is a refused value.
+fn member_values(value: &str) -> Result<Vec<String>, PatchError> {
+    let invalid = |reason: &str| PatchError::InvalidValue {
+        path: "members".into(),
+        reason: reason.into(),
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).map_err(|_| invalid("expected JSON member objects"))?;
+    let members = match parsed {
+        serde_json::Value::Array(members) => members,
+        member @ serde_json::Value::Object(_) => vec![member],
+        _ => return Err(invalid("expected JSON member objects")),
+    };
+    members
+        .iter()
+        .map(|member| {
+            member
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("a member has no value"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -477,6 +544,103 @@ mod tests {
         let result = apply_group_patch(&ops).unwrap();
         assert_eq!(result.remove_members.len(), 1);
         assert_eq!(result.remove_members[0], "user-id-1");
+    }
+
+    /// One PATCH applies in request order, each operation on the result of
+    /// the one before (RFC 7644 3.5.2): the same member added and then
+    /// removed is removed, removed and then added is added.
+    #[test]
+    fn test_group_patch_member_operations_keep_request_order() {
+        let op = |op: &str, path: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: path.into(),
+            value: value.into(),
+        };
+        let add = |id: &str| op("add", "members", &format!(r#"[{{"value":"{id}"}}]"#));
+        let remove = |id: &str| op("remove", &format!(r#"members[value eq "{id}"]"#), "");
+
+        let result = apply_group_patch(&[add("a"), add("b"), remove("a")]).unwrap();
+        assert_eq!(result.add_members, vec!["b"]);
+        assert_eq!(result.remove_members, vec!["a"]);
+        assert!(!result.replaces_members);
+
+        let result = apply_group_patch(&[remove("a"), add("a")]).unwrap();
+        assert_eq!(result.add_members, vec!["a"]);
+        assert!(result.remove_members.is_empty());
+    }
+
+    /// The other member operations directory clients send: a removal that
+    /// lists members in a value array (a `$ref` of null included) removes
+    /// those and nobody else, an empty array nobody; a removal of `members`
+    /// with no value, and a replacement of `members`, set the caller's whole
+    /// list, later operations building on it.
+    #[test]
+    fn test_group_patch_lists_and_whole_set() {
+        let op = |op: &str, path: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: path.into(),
+            value: value.into(),
+        };
+        let listed = apply_group_patch(&[op(
+            "remove",
+            "members",
+            r#"[{"value":"a","$ref":null},{"value":"b"}]"#,
+        )])
+        .unwrap();
+        assert_eq!(listed.remove_members, vec!["a", "b"]);
+        assert!(!listed.replaces_members);
+
+        let nobody = apply_group_patch(&[op("remove", "members", "[]")]).unwrap();
+        assert!(nobody.remove_members.is_empty());
+        assert!(!nobody.replaces_members);
+
+        let cleared = apply_group_patch(&[
+            op("add", "members", r#"[{"value":"a"}]"#),
+            op("remove", "members", ""),
+            op("add", "members", r#"[{"value":"b"}]"#),
+        ])
+        .unwrap();
+        assert!(cleared.replaces_members);
+        assert_eq!(cleared.add_members, vec!["b"]);
+
+        let replaced =
+            apply_group_patch(&[op("replace", "members", r#"[{"value":"a"},{"value":"b"}]"#)])
+                .unwrap();
+        assert!(replaced.replaces_members);
+        assert_eq!(replaced.add_members, vec!["a", "b"]);
+    }
+
+    /// A malformed member value is the client's mistake and fails the
+    /// request: it is never read as an omitted value, which for a removal
+    /// would clear the whole list.
+    #[test]
+    fn test_group_patch_malformed_members_are_refused() {
+        let op = |op: &str, path: &str, value: &str| proto::ScimPatchOp {
+            op: op.into(),
+            path: path.into(),
+            value: value.into(),
+        };
+        for bad in [
+            op("add", "members", "not json"),
+            op("add", "members", r#"[{"display":"no value"}]"#),
+            op("remove", "members", "{"),
+            op("remove", "members", r#"[{"value":7}]"#),
+            op("replace", "members", r#""a string""#),
+        ] {
+            assert!(
+                matches!(
+                    apply_group_patch(std::slice::from_ref(&bad)),
+                    Err(PatchError::InvalidValue { .. })
+                ),
+                "{} {}",
+                bad.op,
+                bad.value
+            );
+        }
+        assert!(matches!(
+            apply_group_patch(&[op("remove", "members[value eq ]", "")]),
+            Err(PatchError::InvalidPath(_))
+        ));
     }
 
     // ── Enterprise Extension (RFC 7643 §4.3) ──

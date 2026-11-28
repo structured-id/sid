@@ -1401,7 +1401,10 @@ impl ScimService for ScimServiceImpl {
         let group_id_str = group.id.to_string();
 
         let patch_result = patch::apply_group_patch(&req.operations).map_err(refusal::patch)?;
-        if !patch_result.add_members.is_empty() || !patch_result.remove_members.is_empty() {
+        if patch_result.replaces_members
+            || !patch_result.add_members.is_empty()
+            || !patch_result.remove_members.is_empty()
+        {
             self.authorize(&caller, SCIM_GROUP_MEMBERSHIP).await?;
         }
 
@@ -1422,6 +1425,9 @@ impl ScimService for ScimServiceImpl {
             write
                 .remove_members
                 .push(self.member(member_id, true).await?);
+        }
+        if patch_result.replaces_members {
+            self.withdraw_unlisted(&caller, &mut write).await?;
         }
         let accounts = |ids: &[ProfileId]| ids.iter().map(ToString::to_string).collect::<Vec<_>>();
         let added: Vec<ProfileId> = write.add_members.iter().map(|m| m.profile_id).collect();
@@ -1640,6 +1646,32 @@ impl ScimServiceImpl {
             }
         }
         Ok(refs)
+    }
+
+    /// Make the members `write` adds the whole of `caller`'s own
+    /// assignments to its group: every other assignment the caller holds
+    /// there is withdrawn. Another source's and local ones are not read.
+    async fn withdraw_unlisted(
+        &self,
+        caller: &ConnectorCaller,
+        write: &mut DirectoryGroupWrite,
+    ) -> Result<(), Status> {
+        let held = self
+            .storage
+            .list_group_assignments(AssignmentsOf::Group(write.group.id))
+            .await
+            .map_err(storage_failure)?;
+        for assignment in held
+            .iter()
+            .filter(|a| a.source == Some(caller.connector.id))
+        {
+            let account = assignment.member.profile_id;
+            let listed = write.add_members.iter().any(|m| m.profile_id == account);
+            if !listed && !write.remove_members.contains(&account) {
+                write.remove_members.push(account);
+            }
+        }
+        Ok(())
     }
 
     /// The members `caller` itself assigned to a group, as the directory
