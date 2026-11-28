@@ -132,10 +132,13 @@ pub enum DirectoryRight {
     /// it; deleting a managed account also ends its access, which takes
     /// [`Self::Active`] as well.
     Delete = 1 << 11,
+    /// Rename the login the organization issued to the user (`userName`).
+    /// Nothing over the login of an identity that signs in elsewhere.
+    UserName = 1 << 12,
 }
 
 impl DirectoryRight {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Name,
         Self::Emails,
         Self::PhoneNumbers,
@@ -148,6 +151,7 @@ impl DirectoryRight {
         Self::ExternalId,
         Self::Active,
         Self::Delete,
+        Self::UserName,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -164,6 +168,7 @@ impl DirectoryRight {
             Self::ExternalId => "external_id",
             Self::Active => "active",
             Self::Delete => "delete",
+            Self::UserName => "user_name",
         }
     }
 }

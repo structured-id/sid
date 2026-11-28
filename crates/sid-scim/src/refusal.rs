@@ -100,17 +100,6 @@ pub(crate) fn patch(e: PatchError) -> Status {
     )
 }
 
-/// A replacement that states another value for `attribute`, which is set
-/// once (RFC 7644 §3.5.1, `mutability`).
-pub(crate) fn immutable(attribute: &'static str) -> Status {
-    invalid(
-        ErrorReason::InvalidFieldValue,
-        "mutability",
-        attribute,
-        "the attribute is immutable",
-    )
-}
-
 /// The user `id` (as the client named it) does not exist, or was deleted
 /// (404, RFC 7644 3.6).
 pub(crate) fn user_not_found(id: impl core::fmt::Display) -> Status {

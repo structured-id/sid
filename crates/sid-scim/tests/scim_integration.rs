@@ -2368,13 +2368,17 @@ async fn sign_in(
     (session, pat)
 }
 
-/// `userName` is given once, when the user is created: discovery says so
-/// (RFC 7643 7, `immutable`), and a PUT that states another value is refused
-/// rather than answered as if it had been applied (RFC 7644 3.5.1). The
-/// value restated, in any letter case (it is not case-exact), is no change.
+/// The organization's login of a user (`userName`, RFC 7643 8.7.1
+/// `readWrite`) is renamed by a connector its manager delegated that to, by
+/// PUT and by PATCH alike. The user keeps its id and the connector's own
+/// identifier of it, and the name it leaves is free at once for another
+/// user, who is another resource. Without the delegation the rename is
+/// refused, a name held by another user conflicts, and neither writes any
+/// part of its request. The value restated, in any letter case (it is not
+/// case-exact), is no change.
 #[tokio::test]
-async fn test_user_name_is_immutable() {
-    let (service, _) = setup().await;
+async fn test_user_name_is_renamed_by_delegation() {
+    let (service, storage, _, directory) = setup_directory().await;
     let schemas = service
         .get_schemas(provisioned(proto::ScimGetSchemasRequest {}))
         .await
@@ -2386,7 +2390,7 @@ async fn test_user_name_is_immutable() {
         .find(|schema| schema.name == "User")
         .and_then(|schema| schema.attributes.iter().find(|a| a.name == "userName"))
         .expect("the User schema declares userName");
-    assert_eq!(declared.mutability, "immutable");
+    assert_eq!(declared.mutability, "readWrite");
 
     let username = unique_username();
     let created = service
@@ -2394,45 +2398,134 @@ async fn test_user_name_is_immutable() {
         .await
         .unwrap()
         .into_inner();
-    let replace = |user_name: String| proto::ScimReplaceUserRequest {
+    let replace = |user_name: &str, title: &str| proto::ScimReplaceUserRequest {
         id: created.id.clone(),
         external_id: created.external_id.clone(),
-        user_name,
+        user_name: user_name.into(),
         name: created.name.clone(),
         emails: created.emails.clone(),
         phone_numbers: created.phone_numbers.clone(),
         active: true,
         department: created.department.clone(),
-        title: "Renamed".into(),
+        title: title.into(),
         ..Default::default()
     };
-    let refused = service
-        .replace_user(provisioned(replace(unique_username())))
-        .await
-        .expect_err("another userName is not applied");
-    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
-    let (_, _, metadata) = sid_infra::grpc_error::extract_error_info(&refused).unwrap();
-    assert_eq!(
-        metadata.get("scimType").map(String::as_str),
-        Some("mutability")
-    );
-    let read = service
-        .get_user(provisioned(proto::ScimGetUserRequest {
-            id: created.id.clone(),
-        }))
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(read.user_name, username);
-    assert_eq!(read.title, "Engineer", "a refused request writes nothing");
+    let read = async || {
+        service
+            .get_user(provisioned(proto::ScimGetUserRequest {
+                id: created.id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+    };
 
-    let replaced = service
-        .replace_user(provisioned(replace(username.to_uppercase())))
+    // Every other part of the user, but not its login.
+    let rights: Vec<_> = DirectoryRight::ALL
+        .into_iter()
+        .filter(|right| *right != DirectoryRight::UserName)
+        .collect();
+    let (_, undelegated) = connector_managing(
+        &storage,
+        directory,
+        &SCIM_ACTIONS,
+        DirectoryRights::of(&rights),
+    )
+    .await;
+    let refused = service
+        .replace_user(with_token(
+            // It is no source of the user and names no identifier of it.
+            proto::ScimReplaceUserRequest {
+                external_id: String::new(),
+                ..replace(&unique_username(), "Refused")
+            },
+            &undelegated,
+        ))
+        .await
+        .expect_err("the login is not this connector's to rename");
+    assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    assert_eq!(read().await.user_name, username);
+    assert_eq!(
+        read().await.title,
+        "Engineer",
+        "a refused request writes nothing"
+    );
+
+    // Restated in another case: no rename, the rest of the request applies.
+    let restated = service
+        .replace_user(with_token(
+            proto::ScimReplaceUserRequest {
+                external_id: String::new(),
+                ..replace(&username.to_uppercase(), "Restated")
+            },
+            &undelegated,
+        ))
         .await
         .expect("the userName restated")
         .into_inner();
-    assert_eq!(replaced.user_name, username);
-    assert_eq!(replaced.title, "Renamed");
+    assert_eq!(restated.user_name, username);
+    assert_eq!(restated.title, "Restated");
+
+    // A name another user holds conflicts and nothing is written.
+    let other = unique_username();
+    service
+        .create_user(provisioned(create_user_request(&other)))
+        .await
+        .unwrap();
+    let taken = service
+        .replace_user(provisioned(replace(&other, "Conflict")))
+        .await
+        .expect_err("the name is held by another user");
+    assert_eq!(taken.code(), tonic::Code::AlreadyExists);
+    assert_eq!(read().await.user_name, username);
+    assert_eq!(read().await.title, "Restated");
+
+    // Renamed by PUT: same resource, same identifier of its source.
+    let renamed = unique_username();
+    let replaced = service
+        .replace_user(provisioned(replace(&renamed, "Restated")))
+        .await
+        .expect("the delegated connector renames the login")
+        .into_inner();
+    assert_eq!(replaced.user_name, renamed);
+    assert_eq!(replaced.id, created.id);
+    assert_eq!(replaced.external_id, created.external_id);
+    assert!(
+        storage
+            .get_principal_by_value(PrincipalType::Username, &format!("{username}#acme.corp"))
+            .await
+            .unwrap()
+            .is_none(),
+        "the old login still resolves"
+    );
+
+    // The name it left is free at once, for a user of its own.
+    let successor = service
+        .create_user(provisioned(proto::ScimCreateUserRequest {
+            external_id: format!("EMP-next-{username}"),
+            ..create_user_request(&username)
+        }))
+        .await
+        .expect("the released name is assigned again")
+        .into_inner();
+    assert_ne!(successor.id, created.id);
+
+    // And by PATCH, through the same path.
+    let again = unique_username();
+    let patched = service
+        .patch_user(provisioned(proto::ScimPatchUserRequest {
+            id: created.id.clone(),
+            operations: vec![proto::ScimPatchOp {
+                op: "replace".into(),
+                path: "userName".into(),
+                value: again.clone(),
+            }],
+        }))
+        .await
+        .expect("PATCH renames the login")
+        .into_inner();
+    assert_eq!(patched.user_name, again);
+    assert_eq!(patched.id, created.id);
 }
 
 /// A connector manages what its manager selected and nothing else: a change

@@ -92,8 +92,11 @@ pub fn scim_create_user_to_sid(
 
     // userName → Principal(Username, "{userName}#{domain}") — federated org login
     if !req.user_name.is_empty() {
-        let corporate_login = format!("{}#{}", req.user_name, ctx.org_domain);
-        principals.push(Principal::new_corporate_login(profile_id, corporate_login));
+        principals.push(organization_login(
+            profile_id,
+            &req.user_name,
+            &ctx.org_domain,
+        ));
     }
 
     let mut emails = Vec::new();
@@ -515,17 +518,13 @@ impl ProfileExt for Profile {
     }
 }
 
-trait PrincipalExt {
-    /// Create a corporate login principal (Username, verified=false).
-    fn new_corporate_login(profile_id: ProfileId, value: String) -> Principal;
-}
-
-impl PrincipalExt for Principal {
-    fn new_corporate_login(profile_id: ProfileId, value: String) -> Principal {
-        let mut login = corporate_contact(profile_id, PrincipalType::Username, value, true);
-        login.source_field = None;
-        login
-    }
+/// The organization's login of `profile_id` for SCIM `userName`:
+/// `{userName}#{domain}`, the one form a create and a rename assign.
+pub fn organization_login(profile_id: ProfileId, user_name: &str, org_domain: &str) -> Principal {
+    let value = format!("{user_name}#{org_domain}");
+    let mut login = corporate_contact(profile_id, PrincipalType::Username, value, true);
+    login.source_field = None;
+    login
 }
 
 #[cfg(test)]

@@ -30,6 +30,9 @@ pub struct UserPatchResult {
     /// the last operation stands. What that changes depends on what the
     /// resource stands for, which the caller of this module decides.
     pub active: Option<bool>,
+    /// The `userName` the request gives the user, when it names it; the
+    /// last operation stands.
+    pub user_name: Option<String>,
     /// Identifiers to add.
     pub add_identifiers: Vec<PatchIdentifier>,
     /// Identifiers to remove (by value).
@@ -164,7 +167,10 @@ fn apply_replace(
         "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:division" | "division" => {
             result.set("division", value)
         }
-        "id" | "userName" => {
+        // The organization's login: whether the caller may rename it is the
+        // caller of this module's to decide.
+        "userName" => result.user_name = Some(value.to_string()),
+        "id" => {
             return Err(PatchError::ImmutableAttribute(path.into()));
         }
         _ => {

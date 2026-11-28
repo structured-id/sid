@@ -138,6 +138,54 @@ impl ScimServiceImpl {
         }
     }
 
+    /// Record in `write` the rename of the organization's login of
+    /// `account` to `wanted`, when `wanted` is another name than the one in
+    /// `held`, with the right it takes in `effects`. The one path PUT and
+    /// PATCH rename through. `userName` is not case-exact (RFC 7643 4.1.1):
+    /// the name restated in another case is no rename. The user keeps its
+    /// resource, its account and its sources' identifiers; the name it
+    /// leaves is released with the principal.
+    #[allow(clippy::result_large_err)]
+    fn rename_login(
+        &self,
+        wanted: &str,
+        account: &Profile,
+        held: &[Principal],
+        write: &mut DirectoryUserWrite,
+        effects: &mut DirectoryRights,
+    ) -> Result<(), Status> {
+        let suffix = format!("#{}", self.org_ctx.org_domain);
+        let login = held
+            .iter()
+            .find(|i| i.principal_type == PrincipalType::Username && i.value.ends_with(&suffix));
+        let name = login.and_then(|i| i.value.strip_suffix(&suffix));
+        if name.is_some_and(|name| name.to_lowercase() == wanted.to_lowercase()) {
+            return Ok(());
+        }
+        // The login of an identity that signs in elsewhere is its issuer's:
+        // no delegation here covers it.
+        if matches!(Target::of(account), Target::Relationship) {
+            return if wanted.is_empty() {
+                Ok(())
+            } else {
+                Err(refusal::not_managed())
+            };
+        }
+        if wanted.is_empty() {
+            return Err(refusal::required("userName"));
+        }
+        if let Some(login) = login {
+            write.unbind.push(login.id);
+        }
+        write.bind.push(crate::mapping::organization_login(
+            account.id,
+            wanted,
+            &self.org_ctx.org_domain,
+        ));
+        *effects = effects.with(DirectoryRight::UserName);
+        Ok(())
+    }
+
     /// The user `resource` as `caller` is shown it, read from the store.
     #[allow(clippy::result_large_err)]
     async fn shown(
@@ -667,17 +715,6 @@ impl ScimService for ScimServiceImpl {
             .map_err(storage_failure)?;
         let mut new_identifiers: Vec<Principal> = Vec::new();
 
-        // RFC 7644 3.5.1: the value given for an immutable attribute that
-        // is set must match it. `userName` is not case-exact (RFC 7643 4.1.1).
-        let suffix = format!("#{}", self.org_ctx.org_domain);
-        let held_name = old_identifiers
-            .iter()
-            .filter(|i| i.principal_type == PrincipalType::Username)
-            .find_map(|i| i.value.strip_suffix(&suffix));
-        if held_name.is_some_and(|held| held.to_lowercase() != req.user_name.to_lowercase()) {
-            return Err(refusal::immutable("userName"));
-        }
-
         // Emails: the contacts and the login handles made of them are
         // replaced only when the request states another set.
         let held_emails = self
@@ -758,6 +795,13 @@ impl ScimService for ScimServiceImpl {
             );
         }
         write.bind = new_identifiers;
+        self.rename_login(
+            &req.user_name,
+            &before,
+            &old_identifiers,
+            &mut write,
+            &mut effects,
+        )?;
 
         // `active` is a change only when it differs from what the user
         // shows. What the change does follows what the resource stands for.
@@ -919,6 +963,9 @@ impl ScimService for ScimServiceImpl {
             }
             effects = effects.with(DirectoryRight::ExternalId);
             write = write.by_source(caller.connector.id, external_id.clone());
+        }
+        if let Some(name) = &patch_result.user_name {
+            self.rename_login(name, &before, &identifiers, &mut write, &mut effects)?;
         }
         let mut deactivating = false;
         if let Some(wanted) = patch_result.active {
@@ -1643,8 +1690,7 @@ impl ScimServiceImpl {
 
 fn user_schema_attributes() -> Vec<proto::ScimSchemaAttribute> {
     vec![
-        // Given when the user is created and kept: it is the login handle.
-        schema_attr("userName", "string", true, false, "immutable"),
+        schema_attr("userName", "string", true, false, "readWrite"),
         schema_attr("displayName", "string", false, false, "readWrite"),
         schema_attr("name", "complex", false, false, "readWrite"),
         schema_attr("emails", "complex", false, true, "readWrite"),
