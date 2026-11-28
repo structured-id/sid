@@ -1820,6 +1820,26 @@ async fn test_resource_types() {
     let names: Vec<&str> = response.resources.iter().map(|r| r.name.as_str()).collect();
     assert!(names.contains(&"User"));
     assert!(names.contains(&"Group"));
+
+    // RFC 7643 §6: the User type names the enterprise extension as optional
+    // and the schemas listing describes it; Group has no extension.
+    let extensions = |name: &str| {
+        let resource = response.resources.iter().find(|r| r.name == name).unwrap();
+        resource
+            .schema_extensions
+            .iter()
+            .map(|e| (e.schema.clone(), e.required))
+            .collect::<Vec<_>>()
+    };
+    let enterprise = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User";
+    assert_eq!(extensions("User"), [(enterprise.to_owned(), false)]);
+    assert!(extensions("Group").is_empty());
+    let schemas = service
+        .get_schemas(provisioned(proto::ScimGetSchemasRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(schemas.resources.iter().any(|s| s.id == enterprise));
 }
 
 #[tokio::test]

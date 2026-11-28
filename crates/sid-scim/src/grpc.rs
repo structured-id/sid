@@ -1243,6 +1243,12 @@ impl ScimService for ScimServiceImpl {
                     endpoint: "/scim/v2/Users".into(),
                     schema: "urn:ietf:params:scim:schemas:core:2.0:User".into(),
                     meta: None,
+                    // RFC 7643 §6: a User may carry the enterprise extension
+                    // and may omit it entirely.
+                    schema_extensions: vec![proto::ScimSchemaExtension {
+                        schema: crate::protocol::ENTERPRISE_SCHEMA.into(),
+                        required: false,
+                    }],
                 },
                 proto::ScimResourceType {
                     id: "Group".into(),
@@ -1251,6 +1257,7 @@ impl ScimService for ScimServiceImpl {
                     endpoint: "/scim/v2/Groups".into(),
                     schema: "urn:ietf:params:scim:schemas:core:2.0:Group".into(),
                     meta: None,
+                    schema_extensions: Vec::new(),
                 },
             ],
         }))

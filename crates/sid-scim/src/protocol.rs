@@ -877,6 +877,15 @@ fn resource_type_json(resource_type: &proto::ScimResourceType) -> Value {
     put(&mut object, "description", &resource_type.description);
     object.insert("endpoint".into(), resource_type.endpoint.clone().into());
     object.insert("schema".into(), resource_type.schema.clone().into());
+    // RFC 7643 §6: `schemaExtensions` is left out when the type has none.
+    if !resource_type.schema_extensions.is_empty() {
+        let extensions: Vec<Value> = resource_type
+            .schema_extensions
+            .iter()
+            .map(|e| json!({ "schema": e.schema, "required": e.required }))
+            .collect();
+        object.insert("schemaExtensions".into(), extensions.into());
+    }
     if let Some(meta) = &resource_type.meta {
         object.insert("meta".into(), meta_json(meta));
     }
